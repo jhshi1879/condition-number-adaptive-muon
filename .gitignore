@@ -1,0 +1,7 @@
+.env
+tests/test_runpod_launch.py
+runpod-results/
+data/fineweb10B/
+logs/
+__pycache__/
+*.py[cod]
