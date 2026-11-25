@@ -143,6 +143,50 @@ After **all three rounds** complete, `post_analysis.py` produces:
 - Exactly two paragraphs in `analysis/experiment_report.md`, also in the notebook.
 - `analysis/analysis_manifest.json` with source-summary and output hashes.
 
+### Required notebook writeup
+
+Include two additional short Markdown paragraphs **in the notebook itself**,
+separate from the two-paragraph results report. Place them before the plots.
+These are required for every future generated notebook, not just this historical
+experiment. Keep the standalone experiment report at exactly two paragraphs.
+
+1. **Model and experiment setup (reproducibility).** State the architecture,
+   parameter count, tied weights, tokenizer/vocabulary and sequence length;
+   dataset source/version, shard identifiers or checksums, training subset and
+   exact held-out selection; optimizer assignments, momentum, learning rates,
+   schedule/warmdown, precision, global/device batches and accumulation; actual
+   alpha grids, per-round step/token budgets, initialization/data-order seeds,
+   validation cadence/budget and final-loss aggregation criterion. Include the
+   exact launch command, source commit or source-file hashes, GPU, and
+   Python/PyTorch/CUDA versions (plus relevant dependency versions). Distinguish
+   recorded settings from inferred defaults; explicitly identify any missing
+   provenance instead of claiming full reproducibility. Mention CUDA
+   nondeterminism and that each trial starts from scratch. Use the actual run's
+   configuration, not blindly copied historical values.
+
+2. **Theory and formalism (especially alpha).** Define gradient $G_t$, EMA
+   momentum $M_t=\beta M_{t-1}+(1-\beta)G_t$, and normalized matrix
+   $X=M_t/\max(\lVert M_t\rVert_F,\epsilon)$, with the tall-matrix transpose
+   convention. Explain the fixed-alpha transform and final update:
+   $Y_\alpha=(XX^\top+\delta^2 I)^{-\alpha/2}X$,
+   $\Delta_\alpha=\sqrt{r}\,Y_\alpha/\max(\lVert Y_\alpha\rVert_F,\epsilon)$,
+   and $W_{t+1}=W_t-\eta\Delta_\alpha$, where $\delta=0.01$ and
+   $r=\min(m,n)$ for each transformed matrix block (transpose back when needed).
+   For $X=U\operatorname{diag}(\sigma_i)V^\top$, show explicitly that
+   $\sigma_i\mapsto\sigma_i(\sigma_i^2+\delta^2)^{-\alpha/2}$
+   before output normalization. Explain that alpha controls spectral flattening,
+   not the learning rate: alpha 0 preserves the momentum direction, alpha 1
+   approximates polar normalization for singular values well above the floor,
+   and alpha above 1 reverses the relative weighting of those above-floor
+   singular values and can amplify noise. In the **unregularized positive-spectrum
+   idealization**, the map is $\sigma_i^{1-\alpha}$ and
+   $\kappa(Y_\alpha)=\kappa(X)^{|1-\alpha|}$; do not present this as exact for the
+   implemented regularized transform or zero singular values. Explain the
+   floor's role near zero (zero singular values remain zero), Frobenius
+   rescaling, and eigendecomposition. Distinguish the swept constant alpha from
+   the original moment-adaptive alpha; do not claim the sweep optimizes that
+   adaptive rule or proves a global optimum.
+
 Required missing rows, missing winner curves, incomplete budgets, inconsistent
 rankings, or mismatched losses are errors, never fabricated success.
 Standalone analysis: `python alpha_sweep/post_analysis.py --sweep-dir RUN_DIR`.
