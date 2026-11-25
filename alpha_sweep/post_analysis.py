@@ -16,9 +16,9 @@ from pathlib import Path
 
 STAGES = ("screening", "refinement", "confirmation")
 LABELS = {
-    "screening": "Screening",
-    "refinement": "Refinement",
-    "confirmation": "Confirmation",
+    "screening": "Round 1",
+    "refinement": "Round 2",
+    "confirmation": "Round 3",
 }
 VAL_PATTERN = re.compile(
     r"step:(\d+)/\d+\s+val_loss:([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
@@ -356,8 +356,8 @@ PLOT_CODE = r'''import matplotlib.pyplot as plt
 
 # DATA is embedded by post_analysis.py so this notebook can be rerun offline.
 STAGE_ORDER = ("screening", "refinement", "confirmation")
-STAGE_LABELS = {"screening": "Screening", "refinement": "Refinement",
-                "confirmation": "Confirmation"}
+STAGE_LABELS = {"screening": "Round 1", "refinement": "Round 2",
+                "confirmation": "Round 3"}
 
 # 1. Final validation loss against alpha, with across-seed standard deviations.
 fig, axes = plt.subplots(1, 3, figsize=(13, 3.8), sharey=True)
@@ -395,7 +395,7 @@ for ax, stage in zip(axes, STAGE_ORDER):
         else:
             ax.text(0.5, 0.5, "No logged curve available", ha="center", va="center",
                     transform=ax.transAxes)
-        ax.set_title("{} winner α={:g}".format(STAGE_LABELS[stage], winner["alpha"]))
+        ax.set_title(r"{} winner $\alpha={:g}$".format(STAGE_LABELS[stage], winner["alpha"]))
     ax.set_xlabel("Training step")
     ax.grid(alpha=0.25)
 axes[0].set_ylabel("Logged validation loss")
@@ -434,10 +434,10 @@ if points:
     ax.plot([p["alpha"] for p in points], [p["std"] for p in points],
             marker="o")
 else:
-    ax.text(0.5, 0.5, "No complete confirmation results", ha="center", va="center",
+    ax.text(0.5, 0.5, "No complete round 3 results", ha="center", va="center",
             transform=ax.transAxes)
 ax.set(xlabel="Alpha", ylabel="Across-seed std. dev. of final validation loss",
-       title="Confirmation seed variability")
+       title="Round 3 seed variability")
 ax.grid(alpha=0.25)
 fig.tight_layout()
 plt.show()
@@ -543,12 +543,13 @@ def _report(data):
     floor_text = (" The configured spectral floor was {}.".format(config["spectral_floor"])
                   if config["spectral_floor"] is not None else "")
     paragraph_one = (
-        "The sweep selected α={:.12g} by minimizing the mean final validation loss, using "
-        "objective '{}' and confirmation seeds {}; its observed mean was {:.6g} with "
-        "population standard deviation {:.6g}, and {}. Budgets were {} screening steps and "
-        "{} refinement steps for screening seed {}, then {} confirmation steps; each run "
+        "The sweep selected $\\alpha={:.12g}$ by minimizing the mean final validation loss, using "
+        "objective '{}' and round 3 seeds {}; its observed mean was {:.6g} with "
+        "population standard deviation {:.6g}, and {}. Budgets were {} round 1 steps and "
+        "{} round 2 steps for seed {}, then {} round 3 steps; each run "
         "used {} validation tokens.{}".format(
-            best["alpha"], config["objective"], config["finalist_seeds"], best["mean"],
+            best["alpha"], config["objective"].replace("confirmation", "round 3"),
+            config["finalist_seeds"], best["mean"],
             best["std"], gap_text, config["screen_steps"], config["refine_steps"],
             config["screening_seed"], config["finalist_steps"], config["val_tokens"], floor_text,
         )

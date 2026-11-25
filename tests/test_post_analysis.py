@@ -105,8 +105,10 @@ class PostAnalysisTests(unittest.TestCase):
 
         report = (destination / "experiment_report.md").read_text().strip()
         self.assertEqual(len(report.split("\n\n")), 2)
-        self.assertIn("objective 'mean final validation loss across confirmation seeds'", report)
-        self.assertIn("confirmation seeds [0, 1]", report)
+        self.assertIn("objective 'mean final validation loss across round 3 seeds'", report)
+        self.assertIn("round 3 seeds [0, 1]", report)
+        self.assertIn("$\\alpha=", report)
+        self.assertNotRegex(report, r"(?i)screening|refinement|confirmation")
         self.assertIn("spectral floor was 0.01", report)
         self.assertIn("not evidence of a global optimum", report)
 
@@ -149,6 +151,16 @@ class PostAnalysisTests(unittest.TestCase):
             plt.show = original_show
             plt.close("all")
         self.assertEqual(len(shown), 5)
+        self.assertEqual([axis.get_title() for axis in shown[0].axes],
+                         ["Round 1", "Round 2", "Round 3"])
+        self.assertEqual(shown[3].axes[0].get_title(), "Round 3 seed variability")
+        for figure in shown:
+            for axis in figure.axes:
+                self.assertNotRegex(axis.get_title(), r"(?i)screening|refinement|confirmation")
+                legend = axis.get_legend()
+                if legend is not None:
+                    for label in legend.get_texts():
+                        self.assertNotRegex(label.get_text(), r"(?i)screening|refinement|confirmation")
 
     def test_manifest_rerun_is_idempotent_and_different_summary_is_refused(self):
         _, destination = post_analysis.create_analysis(self.sweep_dir)

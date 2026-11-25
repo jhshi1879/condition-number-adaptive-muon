@@ -145,6 +145,11 @@ After **all three rounds** complete, `post_analysis.py` produces:
 
 ### Required notebook writeup
 
+Use **Round 1**, **Round 2**, and **Round 3** in reader-facing prose, figure
+titles, legends, and tables, rather than descriptive stage names. Internal
+result-schema keys remain unchanged for compatibility. Use `$...$` for inline
+LaTeX and `$$...$$` for display equations in notebook Markdown.
+
 Include two additional short Markdown paragraphs **in the notebook itself**,
 separate from the two-paragraph results report. Place them before the plots.
 These are required for every future generated notebook, not just this historical
