@@ -4,6 +4,14 @@ Experiment scripts based on the [modded-nanogpt Muon record](https://github.com/
 
 `train_gpt2_cond_muon.py` implements the condition-number-adaptive optimizer; `train_gpt2.py` and `train_gpt2_adamw.py` are comparison trainers. See [study_notes.md](study_notes.md) for the algorithm and limitations.
 
+## Reusable alpha-sweep workflow
+
+See [alpha_sweep.md](alpha_sweep.md) for the experiment skill, historical results,
+credentials, monitoring, recovery, and safe publication/shutdown.
+[alpha_sweep/launch.sh](alpha_sweep/launch.sh) starts the three-round sweep and
+finalizer in pod-side tmux, skipping standalone preflight and smoke runs while
+retaining runtime validation and publication verification.
+
 ## Training
 
 Use Python 3.10 or later, NumPy, and a CUDA-enabled PyTorch 2.x installation with `torch.compile` support. Install PyTorch using the instructions for your CUDA environment. The trainers require NVIDIA GPUs, NCCL, and `torchrun`; they do not run on CPU or macOS GPU.

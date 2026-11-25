@@ -6,7 +6,9 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest import mock
 
@@ -70,6 +72,48 @@ class FinalizationTests(unittest.TestCase):
                 with self.assertRaisesRegex(RuntimeError, "RUNPOD_API_KEY is missing"):
                     finish.read_token(config)
                 ssh.assert_not_called()
+
+    def test_skip_preflight_freezes_sources_without_api_or_git_probe(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in finish.SOURCES:
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(b"pass\n")
+            sweep = root / "sweep"
+            sweep.mkdir()
+            finish.atomic_json(sweep / "summary.json", dict(status="running", config={"seed": 0}))
+            key = Path("/dev/shm/test-publisher/key")
+            stat = Path.stat
+
+            def key_stat(path, *args, **kwargs):
+                return SimpleNamespace(st_mode=0o600) if path == key else stat(path, *args, **kwargs)
+
+            options = SimpleNamespace(
+                repo="owner/repo", branch="main", results_relative="alpha_sweep/results/test",
+                ssh_key=key, pod_id="test-pod", project_root=root, sweep_dir=str(sweep),
+                known_hosts=root / "hosts", deploy_key_id=42, state_dir=root / "state",
+                skip_preflight=True,
+            )
+            with mock.patch.object(Path, "stat", key_stat), \
+                 mock.patch.object(finish, "read_token", return_value="private-test-token") as token, \
+                 mock.patch.object(finish, "git_command") as git, \
+                 mock.patch.object(finish, "run") as run, mock.patch("builtins.print"):
+                finish.prepare_pod(options)
+                self.assertFalse(token.call_args.kwargs["verify"])
+                git.assert_not_called()
+                run.assert_not_called()
+            self.assertEqual(json.loads((options.state_dir / "state.json").read_text())["phase"], "waiting")
+            self.assertEqual((options.state_dir / "sources/alpha_sweep/launch.sh").read_bytes(), b"pass\n")
+
+    def test_skipped_credential_probe_does_not_skip_runtime_authentication(self):
+        with mock.patch.dict(os.environ, {"RUNPOD_API_KEY": "private-test-token"}), \
+             mock.patch.object(finish, "runpod_request", return_value={"id": "test-pod"}) as request:
+            config = dict(on_pod=True, pod_id="test-pod")
+            self.assertEqual(finish.read_token(config, verify=False), "private-test-token")
+            request.assert_not_called()
+            finish.read_token(config)
+            request.assert_called_once_with("private-test-token", "test-pod")
 
     def test_publication_rejects_checkpoints_and_credential_leaks(self):
         for files in (
@@ -224,6 +268,29 @@ class FinalizationTests(unittest.TestCase):
                 finish.monitor_pod({}, Path("/unused"), {})
             token.assert_not_called()
 
+    def test_session_cleanup_checks_every_pane_in_the_target_session(self):
+        config = dict(on_pod=True, training_session="alpha-sweep", analysis_session="alpha-post-analysis")
+
+        def execute(command):
+            exec(command[2], {"__name__": "__main__"})
+
+        for panes, allowed in (("1\n1\n", True), ("1\n0\n", False), ("", False)):
+            with self.subTest(panes=panes), \
+                 mock.patch.object(finish, "run", side_effect=execute), \
+                 mock.patch.object(finish.subprocess, "run") as action, \
+                 mock.patch.object(finish.subprocess, "check_output", return_value=panes) as probe, \
+                 mock.patch.object(sys, "argv", ["-c", json.dumps(config)]):
+                action.return_value.returncode = 0
+                if allowed:
+                    finish.close_sessions(config)
+                    self.assertEqual(sum(call.args[0][1] == "kill-session" for call in action.call_args_list), 2)
+                else:
+                    with self.assertRaisesRegex(RuntimeError, "live tmux"):
+                        finish.close_sessions(config)
+                    self.assertFalse(any(call.args[0][1] == "kill-session" for call in action.call_args_list))
+                self.assertEqual(probe.call_args_list[0].args[0],
+                                 ["tmux", "list-panes", "-s", "-t", "=alpha-sweep", "-F", "#{pane_dead}"])
+
     def test_shutdown_only_follows_verified_publication(self):
         summary = self.summary()
         config = dict(
@@ -305,6 +372,62 @@ class FinalizationTests(unittest.TestCase):
             finish.monitor(dict(pod_id="test-pod"), Path(directory), state)
             remote.assert_not_called()
             shutdown.assert_called_once()
+
+
+class SweepLauncherTests(unittest.TestCase):
+    def test_launcher_starts_real_sweep_and_finalizer_in_tmux_without_smoke_runs(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            calls = root / "calls.jsonl"
+            python = root / "fake-python"
+            python.write_text(
+                "#!" + sys.executable + "\n"
+                "import json, os, sys\n"
+                "from pathlib import Path\n"
+                "with open(os.environ['CALLS'], 'a') as stream:\n"
+                " stream.write(json.dumps(['python'] + sys.argv[1:]) + '\\n')\n"
+                "if '--sweep' in sys.argv:\n"
+                " root = Path(sys.argv[sys.argv.index('--output-dir')+1])\n"
+                " root.mkdir()\n"
+                " (root/'summary.json').write_text('{}')\n"
+            )
+            python.chmod(0o700)
+            tmux = root / "tmux"
+            tmux.write_text(
+                "#!" + sys.executable + "\n"
+                "import json, os, subprocess, sys\n"
+                "with open(os.environ['CALLS'], 'a') as stream:\n"
+                " stream.write(json.dumps(['tmux'] + sys.argv[1:]) + '\\n')\n"
+                "if sys.argv[1] == 'has-session': sys.exit(1)\n"
+                "if sys.argv[1] == 'new-session':\n"
+                " env = dict(os.environ, TMUX='test-session')\n"
+                " sys.exit(subprocess.run(['bash','-c',sys.argv[-1]], env=env).returncode)\n"
+            )
+            tmux.chmod(0o700)
+            environment = dict(os.environ, PATH=str(root) + os.pathsep + os.environ["PATH"],
+                               PYTHON=str(python), CALLS=str(calls), RUNPOD_POD_ID="test-pod")
+            sweep = root / "results with spaces"
+            command = [
+                "bash", str(ROOT / "alpha_sweep/launch.sh"),
+                str(sweep), "test-pod", "/dev/shm/key", "/dev/shm/hosts", "42",
+            ]
+            result = subprocess.run(command, env=environment, capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            records = [json.loads(line) for line in calls.read_text().splitlines()]
+            sessions = [row[row.index("-s")+1] for row in records if row[:2] == ["tmux", "new-session"]]
+            self.assertEqual(sessions, ["alpha-finalize", "alpha-sweep"])
+            python_calls = [row for row in records if row[0] == "python"]
+            self.assertEqual(len(python_calls), 3)
+            self.assertIn("--sweep", python_calls[0])
+            self.assertEqual(python_calls[0][python_calls[0].index("--finalist-steps")+1], "500")
+            self.assertIn("--skip-preflight", python_calls[1])
+            self.assertIn("--prepare", python_calls[1])
+            self.assertNotIn("--prepare", python_calls[2])
+            before = len(records)
+            result = subprocess.run(command, env=environment, capture_output=True, text=True)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("never overwritten", result.stderr)
+            self.assertEqual(len(calls.read_text().splitlines()), before)
 
 
 if __name__ == "__main__":

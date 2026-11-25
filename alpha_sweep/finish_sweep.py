@@ -25,6 +25,8 @@ import urllib.request
 
 STAGES = ("screening", "refinement", "confirmation")
 SOURCES = (
+    "alpha_sweep.md",
+    "alpha_sweep/launch.sh",
     "alpha_sweep/models.py",
     "alpha_sweep/train_gpt2_cond_muon.py",
     "alpha_sweep/post_analysis.py",
@@ -134,7 +136,7 @@ def validate_summary(summary, expected_config):
         raise ValueError("Completed sweep has no consistent final ranking")
 
 
-def read_token(config):
+def read_token(config, verify=True):
     # sshd drops the container's inherited environment.
     script = """
 import os
@@ -170,9 +172,10 @@ sys.stdout.write(token)
         ]).strip()
     if not isinstance(token, str) or not token or any(char.isspace() for char in token):
         raise RuntimeError("The selected source has no usable Runpod API credential")
-    pod = runpod_request(token, config["pod_id"])
-    if pod["id"] != config["pod_id"]:
-        raise ValueError("Runpod authentication resolved a different pod")
+    if verify:
+        pod = runpod_request(token, config["pod_id"])
+        if pod["id"] != config["pod_id"]:
+            raise ValueError("Runpod authentication resolved a different pod")
     return token
 
 
@@ -187,7 +190,7 @@ def github(method, path, payload=None):
 def validate_publish_files(files, token):
     secrets = re.compile(rb"(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")
     for path, content in files.items():
-        if Path(path).suffix not in (".py", ".ipynb", ".md"):
+        if Path(path).suffix not in (".py", ".ipynb", ".md", ".sh"):
             raise ValueError(f"Not an allowed publication type: {path}")
         if len(content) > 8 * 1024 * 1024 or b"\0" in content:
             raise ValueError(f"Publication file is binary or exceeds 8 MiB: {path}")
@@ -415,8 +418,8 @@ def close_sessions(config):
         "\nfor name in (c['training_session'],c['analysis_session']):\n"
         " found=subprocess.run(['tmux','has-session','-t','='+name],capture_output=True)\n"
         " if found.returncode==0:\n"
-        "  dead=subprocess.check_output(['tmux','display-message','-p','-t','='+name,'#{pane_dead}'],text=True).strip()\n"
-        "  if dead!='1': raise RuntimeError('Refusing to close a live tmux process: '+name)\n"
+        "  dead=subprocess.check_output(['tmux','list-panes','-s','-t','='+name,'-F','#{pane_dead}'],text=True).splitlines()\n"
+        "  if not dead or any(value!='1' for value in dead): raise RuntimeError('Refusing to close a live tmux process: '+name)\n"
         "  subprocess.run(['tmux','kill-session','-t','='+name],check=True)\n"
     )
     command = ["/workspace/venv/bin/python", "-c", code, json.dumps(config)]
@@ -569,7 +572,7 @@ def prepare_pod(options):
         training_session="alpha-sweep", analysis_session="alpha-post-analysis",
         finalization_session="alpha-finalize",
     )
-    token = read_token(config)
+    token = read_token(config, verify=not options.skip_preflight)
     summary = json.loads((Path(config["sweep_dir"]) / "summary.json").read_text())
     if summary["status"] != "running":
         raise ValueError("Arm pod-side finalization while the sweep is running")
@@ -582,16 +585,20 @@ def prepare_pod(options):
         target = state_dir / "sources" / name
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(content)
-    directory = state_dir / "publication.git"
-    run(["git", "init", "--bare", str(directory)])
-    git_command(config, directory, "remote", "add", "origin", "git@github.com:" + config["repo"] + ".git")
-    branch = "refs/heads/" + config["branch"]
-    git_command(config, directory, "fetch", "--no-tags", "--depth=1", "origin", branch)
-    head = git_command(config, directory, "rev-parse", "FETCH_HEAD")
-    git_command(config, directory, "push", "--dry-run", "origin", head + ":" + branch)
+    if not options.skip_preflight:
+        directory = state_dir / "publication.git"
+        run(["git", "init", "--bare", str(directory)])
+        git_command(config, directory, "remote", "add", "origin", "git@github.com:" + config["repo"] + ".git")
+        branch = "refs/heads/" + config["branch"]
+        git_command(config, directory, "fetch", "--no-tags", "--depth=1", "origin", branch)
+        head = git_command(config, directory, "rev-parse", "FETCH_HEAD")
+        git_command(config, directory, "push", "--dry-run", "origin", head + ":" + branch)
     atomic_json(state_dir / "config.json", config)
     atomic_json(state_dir / "state.json", dict(phase="waiting"))
-    print("Pod preflight passed: repository-only Git push and Runpod access verified.", flush=True)
+    if options.skip_preflight:
+        print("Sources frozen; preflight API probe and Git push dry-run skipped by request.", flush=True)
+    else:
+        print("Pod preflight passed: repository-only Git push and Runpod access verified.", flush=True)
 
 
 def finalize_pod(config, state_dir, token, state):
@@ -670,6 +677,8 @@ def main():
     parser.add_argument("--prepare", action="store_true")
     parser.add_argument("--pod-watch", action="store_true", help="on the pod, wait for the sweep then generate analysis")
     parser.add_argument("--on-pod", action="store_true", help="publish and stop from pod tmux using a RAM-only deploy key")
+    parser.add_argument("--skip-preflight", action="store_true",
+                        help="with --on-pod --prepare, skip API probe and Git dry-run; retain runtime safeguards")
     parser.add_argument("--deploy-key-id", type=int, help="GitHub deploy key ID, recorded for later public-key cleanup")
     parser.add_argument("--project-root", type=Path, default=Path(__file__).resolve().parent.parent)
     parser.add_argument("--host")
@@ -684,6 +693,8 @@ def main():
     parser.add_argument("--remote-project", default="/workspace/condition-number-adaptive-muon")
     parser.add_argument("--results-relative", default="alpha_sweep/results/three-rounds")
     options = parser.parse_args()
+    if options.skip_preflight and not (options.on_pod and options.prepare):
+        parser.error("--skip-preflight requires --on-pod --prepare")
     if options.pod_watch:
         pod_watch(
             options.sweep_dir,
