@@ -10,6 +10,66 @@ experiment. This is the skill source document; to register it with a client that
 requires the standard layout, copy it to that client's `alpha-sweep/SKILL.md`.
 Do not launch a new pod or rerun training merely to read this skill.
 
+## 1. Set up a low-cost Runpod GPU and durable volume
+
+When the user authorizes a new experiment, begin by provisioning **one GPU pod
+for less than $1/hour in total pod compute charges**. This ceiling is strict:
+do not select a $1/hour-or-higher pod, or interpret it as permission for a
+more expensive fallback. Storage bills separately. This section describes the
+setup workflow; reading the skill alone does not authorize provisioning.
+
+1. Follow the installed Runpod routing, pod-deploy, and network-volume
+   procedures and the training-pod golden path. Check the authenticated account,
+   available balance, registered SSH public key, and existing volumes before
+   creating resources. Read current GPU **pod** pricing, stock by data center,
+   CUDA availability, network-storage availability and storage pricing. Choose
+   the least expensive available CUDA-compatible GPU that fits the workload,
+   rather than assuming historical prices or stock still apply.
+2. The historical 29.9M-parameter workload used approximately 6 GiB of GPU
+   memory during a live trial on a 24 GB card; allow headroom for compilation,
+   allocator use, and variations. Prefer a card with at least 16 GB of VRAM;
+   this is a conservative selection, not a proven minimum. Match a current
+   official PyTorch image to its supported CUDA version and pin the minimum
+   host CUDA version to the image's version (e.g. 12.8 for a CUDA 12.8 image).
+3. Before creating billable resources, state the chosen GPU and **actual hourly
+   pod rate**, the volume size and storage billing, and an estimated duration
+   and total cost if a credible estimate exists. Ensure available credit covers
+   the planned run and storage; runtime is variable. If no suitable GPU below
+   $1/hour is in stock, report that and ask whether to wait or change the
+   budget—never create an over-budget pod.
+4. Choose an available data center with network storage and create or reuse an
+   appropriately sized **network volume in that same data center**. For the
+   unchanged historical experiment, **30 GB** is a practical starting point:
+   the 33 training shards plus validation shard occupy approximately 6.8 GB,
+   with additional room for the environment, compilation caches, 40 final
+   checkpoints, logs and notebook. Size larger for a larger grid, more seeds,
+   additional datasets, or existing data; do not delete existing volumes to
+   make room without authorization. State that volume charges continue until
+   deletion. Network volumes require a Secure Cloud pod in the volume's data
+   center and an explicit `/workspace` mount.
+5. Create the pod with the chosen GPU and current official PyTorch image,
+   CUDA floor, co-located `/workspace` mount, registered SSH key, and direct
+   SSH (`22/tcp`, with SSH enabled). Expose no web ports unless requested.
+   Read the created pod back, confirm its GPU and volume mount, and obtain its
+   **current** direct SSH host and port. Verify the SSH host key before copying
+   files or connecting; do not disable host-key checking. Never reuse an old
+   pod's IP or port after a restart.
+6. Put this repository, Python environment, FineWeb data, compilation caches,
+   and outputs on `/workspace`, not the ephemeral container disk. Use the
+   prerequisite instructions below to fetch the 33 shards if absent and
+   prepare a repository-only deploy key and pod-scoped shutdown access. The
+   pod's `RUNPOD_API_KEY` must have permission to read and stop that pod; do
+   not assume it exists or copy an account-wide GitHub credential to the pod.
+   Launch the **real** three-round run directly in tmux, as described below.
+   Do not add a separate preflight or smoke training run.
+
+If creation fails because stock changed, re-read availability. Keep any volume
+already created; retry once in its data center if stock remains, otherwise ask
+before waiting, choosing another eligible GPU, or moving data centers. Do not
+silently create another volume or exceed the price ceiling. After completion,
+verify the pod is stopped independently and retain the volume until the user
+authorizes its deletion.
+
 ## Execution policy
 
 - **Skip separate preflight and smoke tests.** Start the real experiment directly:
