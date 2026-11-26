@@ -46,6 +46,81 @@ class FinalizationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "completed"):
             finish.validate_summary(summary, summary["config"])
 
+    def test_five_rounds_require_every_grid_and_trial(self):
+        def five_rounds():
+            summary = self.summary()
+            for stage in finish.STAGES:
+                del summary[stage]
+            stages = [f"round_{index}" for index in range(1, 6)]
+            summary["config"].update(
+                rounds=5, alpha_grid=[0.0, 1.5], screen_steps=100,
+                refine_steps=100, finalist_steps=500,
+            )
+            summary["round_grids"] = {stage: [0.0, 1.5] for stage in stages}
+            for stage in stages:
+                seeds = [0, 1] if stage == stages[-1] else [0]
+                summary[stage] = [
+                    dict(alpha=alpha, seed=seed, status="completed", final_val_loss=5.0)
+                    for alpha in (0.0, 1.5) for seed in seeds
+                ]
+            return summary
+
+        summary = five_rounds()
+        finish.validate_summary(summary, summary["config"].copy())
+        for mutation in (
+            lambda s: s["round_3"].pop(),
+            lambda s: s["round_5"].pop(),
+            lambda s: s["round_4"].append(s["round_4"][0]),
+            lambda s: s["round_grids"].pop("round_2"),
+            lambda s: s["round_grids"]["round_1"].pop(),
+            lambda s: s["round_grids"].update(round_6=[1.5]),
+            lambda s: s["round_grids"].update(round_4=[]),
+            lambda s: s["round_grids"]["round_4"].append(1.5),
+            lambda s: s.update(round_6=[]),
+            lambda s: s.pop("round_2"),
+            lambda s: s["round_5"][1].update(seed=2),
+            lambda s: s["round_3"][0].update(status="running"),
+            lambda s: s["round_4"][0].update(final_val_loss=float("nan")),
+        ):
+            summary = five_rounds()
+            mutation(summary)
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                finish.validate_summary(summary, summary["config"].copy())
+
+        for rounds in (0, -1, 5.0, True):
+            summary = five_rounds()
+            summary["config"]["rounds"] = rounds
+            with self.subTest(rounds=rounds), self.assertRaisesRegex(ValueError, "rounds"):
+                finish.validate_summary(summary, summary["config"].copy())
+
+    def test_one_and_two_rounds_require_correct_seed_coverage(self):
+        for rounds in (1, 2):
+            with self.subTest(rounds=rounds):
+                stages = [f"round_{index}" for index in range(1, rounds + 1)]
+                config = dict(rounds=rounds, alpha_grid=[0.0, 1.5], screening_seed=7,
+                              finalist_seeds=[0, 1], screen_steps=100, refine_steps=100,
+                              finalist_steps=500)
+                summary = dict(
+                    status="completed", config=config, best_alpha=1.5,
+                    ranking=[dict(alpha=1.5)],
+                    round_grids={stage: config["alpha_grid"][:] for stage in stages},
+                )
+                for stage in stages:
+                    seeds = config["finalist_seeds"] if stage == stages[-1] else [7]
+                    summary[stage] = [
+                        dict(alpha=alpha, seed=seed, status="completed", final_val_loss=5.0)
+                        for alpha in config["alpha_grid"] for seed in seeds
+                    ]
+                finish.validate_summary(summary, config.copy())
+                missing = summary[stages[-1]].pop()
+                with self.assertRaisesRegex(ValueError, "incomplete"):
+                    finish.validate_summary(summary, config.copy())
+                summary[stages[-1]].append(missing)
+                if rounds == 2:
+                    summary["round_1"][0]["seed"] = 0
+                    with self.assertRaisesRegex(ValueError, "incomplete"):
+                        finish.validate_summary(summary, config.copy())
+
     def test_stop_credential_survives_ssh_environment_filtering(self):
         def ssh(config, command):
             with mock.patch.dict(os.environ, {}, clear=True), \
@@ -376,6 +451,33 @@ class FinalizationTests(unittest.TestCase):
 
 class SweepLauncherTests(unittest.TestCase):
     def test_launcher_starts_real_sweep_and_finalizer_in_tmux_without_smoke_runs(self):
+        self.check_launcher([], [str(i / 4).rstrip("0").rstrip(".") if i % 4 else str(i // 4)
+                                 for i in range(13)], 3)
+
+    def test_launcher_forwards_five_rounds_and_custom_alpha_grid(self):
+        grid = [f"{i / 4:g}" for i in range(12, 41)]
+        self.check_launcher(["--rounds", "5", "--alpha-grid", *grid], grid, 5)
+
+    def test_launcher_forwards_one_and_two_rounds(self):
+        for rounds in (1, 2):
+            with self.subTest(rounds=rounds):
+                self.check_launcher(["--rounds", str(rounds), "--alpha-grid", "3", "10"],
+                                    ["3", "10"], rounds)
+        self.check_launcher(["--alpha-grid", "3", "--rounds", "1"], ["3"], 1)
+
+    def test_launcher_rejects_bad_options_before_starting_tmux(self):
+        for options in (["--rounds", "0"], ["--rounds", "-1"], ["--rounds", "1.5"],
+                        ["--rounds"], ["--alpha-grid", "3"], ["--rounds", "1", "--alpha-grid"],
+                        ["--unknown"]):
+            with self.subTest(options=options), mock.patch.dict(os.environ, {"RUNPOD_POD_ID": "test-pod"}):
+                result = subprocess.run([
+                    "bash", str(ROOT / "alpha_sweep/launch.sh"),
+                    "/unused-test-sweep", "test-pod", "/dev/shm/key", "/dev/shm/hosts", "42",
+                    *options,
+                ], capture_output=True, text=True)
+                self.assertEqual(result.returncode, 2, result.stderr)
+
+    def check_launcher(self, options, expected_grid, rounds):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             calls = root / "calls.jsonl"
@@ -410,7 +512,7 @@ class SweepLauncherTests(unittest.TestCase):
             command = [
                 "bash", str(ROOT / "alpha_sweep/launch.sh"),
                 str(sweep), "test-pod", "/dev/shm/key", "/dev/shm/hosts", "42",
-            ]
+            ] + options
             result = subprocess.run(command, env=environment, capture_output=True, text=True)
             self.assertEqual(result.returncode, 0, result.stderr)
             records = [json.loads(line) for line in calls.read_text().splitlines()]
@@ -419,7 +521,16 @@ class SweepLauncherTests(unittest.TestCase):
             python_calls = [row for row in records if row[0] == "python"]
             self.assertEqual(len(python_calls), 3)
             self.assertIn("--sweep", python_calls[0])
+            self.assertEqual(python_calls[0][python_calls[0].index("--rounds")+1], str(rounds))
+            grid_start = python_calls[0].index("--alpha-grid") + 1
+            grid_end = python_calls[0].index("--screen-steps")
+            self.assertEqual(python_calls[0][grid_start:grid_end], expected_grid)
+            self.assertEqual(python_calls[0][python_calls[0].index("--screen-steps")+1], "100")
+            self.assertEqual(python_calls[0][python_calls[0].index("--refine-steps")+1], "100")
             self.assertEqual(python_calls[0][python_calls[0].index("--finalist-steps")+1], "500")
+            seed_start = python_calls[0].index("--finalist-seeds") + 1
+            self.assertEqual(python_calls[0][seed_start:seed_start+2], ["0", "1"])
+            self.assertIn("--no-checkpoints", python_calls[0])
             self.assertIn("--skip-preflight", python_calls[1])
             self.assertIn("--prepare", python_calls[1])
             self.assertNotIn("--prepare", python_calls[2])

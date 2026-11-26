@@ -1,4 +1,7 @@
 import ast
+import argparse
+import contextlib
+import io
 import json
 import math
 import os
@@ -51,7 +54,7 @@ class AlphaSweepTests(unittest.TestCase):
         for value in (matrix, matrix.T, torch.zeros_like(matrix)):
             x = value / value.norm().clamp_min(1e-7)
             u, s, vh = torch.linalg.svd(x, full_matrices=False)
-            for alpha in (0.0, 0.5, 1.0, 1.5, 2.0, 3.0):
+            for alpha in (0.0, 0.5, 1.0, 1.5, 2.0, 3.0, 10.0):
                 with self.subTest(shape=value.shape, alpha=alpha):
                     actual, recorded = transform(value, 10.0, 1e-7, alpha=alpha)
                     expected = (u * (s * (s.square() + 0.01**2).pow(-alpha / 2))) @ vh
@@ -93,6 +96,7 @@ class AlphaSweepTests(unittest.TestCase):
 
             def child(command, **kwargs):
                 commands.append(command)
+                self.assertIn("--no-checkpoints", command)
                 alpha = float(command[command.index("--alpha") + 1])
                 seed = int(command[command.index("--seed") + 1])
                 steps = int(command[command.index("--num-iterations") + 1])
@@ -119,6 +123,11 @@ class AlphaSweepTests(unittest.TestCase):
                 result = namespace["run_alpha_sweep"](options)
             self.assertEqual(len(commands), 36)
             self.assertEqual(result["status"], "completed_with_divergences")
+            self.assertEqual(list(result), [
+                "status", "config", "screening", "refinement", "confirmation",
+                "round_grids", "ranking", "best_alpha", "best_at_grid_boundary",
+            ])
+            self.assertNotIn("rounds", result["config"])
             self.assertEqual(result["best_alpha"], 1.46875)
             self.assertEqual(len(result["refinement"]), 18)
             self.assertEqual(len(result["confirmation"]), 14)
@@ -136,6 +145,144 @@ class AlphaSweepTests(unittest.TestCase):
             self.assertEqual(saved, result)
             with self.assertRaises(FileExistsError):
                 namespace["run_alpha_sweep"](options)
+
+    def test_five_round_sweep_refines_each_round_and_confirms_with_two_seeds(self):
+        namespace = sweep_namespace()
+        with tempfile.TemporaryDirectory() as directory:
+            options = SimpleNamespace(
+                output_dir=Path(directory) / "sweep",
+                alpha_grid=[index / 4 for index in range(41)], rounds=5,
+                screen_steps=100, refine_steps=100, finalist_steps=500, seed=0,
+                finalist_seeds=[0, 1], top_k=2, device_batch_size=8,
+                val_tokens=1048576, val_loss_every=25, save_every=0,
+                warmdown_iters=10,
+            )
+            commands = []
+
+            def child(command, **kwargs):
+                commands.append(command)
+                self.assertIn("--no-checkpoints", command)
+                alpha = float(command[command.index("--alpha") + 1])
+                seed = int(command[command.index("--seed") + 1])
+                steps = int(command[command.index("--num-iterations") + 1])
+                result_file = Path(command[command.index("--result-file") + 1])
+                diverged = alpha == 10
+                namespace["write_json"](result_file, dict(
+                    status="diverged" if diverged else "completed",
+                    alpha=alpha, seed=seed, step=steps,
+                    final_val_loss=None if diverged else (alpha - 3.125)**2 + seed,
+                ))
+                return SimpleNamespace(returncode=int(diverged))
+
+            with mock.patch.object(subprocess, "run", side_effect=child), mock.patch("builtins.print"):
+                result = namespace["run_alpha_sweep"](options)
+
+            stages = [f"round_{index}" for index in range(1, 6)]
+            self.assertEqual(result["config"]["rounds"], 5)
+            self.assertEqual(set(result["round_grids"]), set(stages))
+            self.assertFalse({"screening", "refinement", "confirmation"} & result.keys())
+            self.assertEqual(result["round_grids"]["round_1"], options.alpha_grid)
+            radius = 0.25
+            for index in range(1, 5):
+                preceding = result[stages[index - 1]]
+                centers = [row["alpha"] for row in sorted(
+                    (row for row in preceding if row["status"] == "completed"),
+                    key=lambda row: (row["final_val_loss"], row["alpha"]),
+                )[:2]]
+                subdivisions = 4 if index == 1 else 2
+                expected = sorted({
+                    round(center + radius * offset / subdivisions, 12)
+                    for center in centers for offset in range(-subdivisions, subdivisions + 1)
+                    if 0 <= round(center + radius * offset / subdivisions, 12) <= 10
+                })
+                self.assertEqual(result["round_grids"][stages[index]], expected)
+                radius /= subdivisions
+            for stage in stages[:-1]:
+                self.assertTrue(all(row["seed"] == 0 and row["step"] == 100 for row in result[stage]))
+            self.assertEqual({row["seed"] for row in result[stages[-1]]}, {0, 1})
+            self.assertTrue(all(row["step"] == 500 for row in result[stages[-1]]))
+            self.assertEqual(result["best_alpha"], 3.125)
+            self.assertEqual(result["ranking"][0]["seed_losses"], [0.0, 1.0])
+            self.assertEqual(result["status"], "completed_with_divergences")
+            self.assertEqual(json.loads((options.output_dir / "summary.json").read_text()), result)
+
+    def test_checkpoint_condition_for_direct_training(self):
+        source = ast.parse((SWEEP / "train_gpt2_cond_muon.py").read_text())
+        loop = next(node for node in source.body if isinstance(node, ast.For)
+                    and isinstance(node.target, ast.Name) and node.target.id == "step")
+        checkpoint = next(
+            node for node in loop.body if isinstance(node, ast.If)
+            and any(isinstance(child, ast.Call) and isinstance(child.func, ast.Attribute)
+                    and isinstance(child.func.value, ast.Name)
+                    and child.func.value.id == "torch" and child.func.attr == "save"
+                    for child in ast.walk(node))
+        )
+        code = compile(ast.Module(body=[checkpoint], type_ignores=[]), "<checkpoint>", "exec")
+        for disabled, interval, step, last, expected in (
+            (False, 0, 10, True, True),
+            (False, 0, 0, False, False),
+            (False, 5, 5, False, True),
+            (True, 0, 10, True, False),
+            (True, 5, 5, False, False),
+        ):
+            with self.subTest(disabled=disabled, interval=interval, step=step, last=last):
+                fake_torch = mock.Mock()
+                env = dict(
+                    master_process=True, options=SimpleNamespace(no_checkpoints=disabled, alpha=1, seed=0),
+                    args=SimpleNamespace(save_every=interval), step=step, last_step=last,
+                    torch=fake_torch, time=SimpleNamespace(time=lambda: 1), t0=0,
+                    training_time_ms=0, code="source", raw_model=mock.Mock(),
+                    optimizers=[mock.Mock()], os=os, logdir="logs",
+                )
+                exec(code, env)
+                self.assertEqual(fake_torch.save.call_count, int(expected))
+                if expected:
+                    self.assertEqual(fake_torch.save.call_args.args[1], f"logs/state_step{step:06d}.pt")
+
+    def test_one_and_two_round_sweeps(self):
+        namespace = sweep_namespace()
+        for rounds, initial in ((1, [3.0]), (2, [3.0, 3.25, 3.5])):
+            with self.subTest(rounds=rounds), tempfile.TemporaryDirectory() as directory:
+                options = SimpleNamespace(
+                    output_dir=Path(directory) / "sweep", alpha_grid=initial, rounds=rounds,
+                    screen_steps=100, refine_steps=100, finalist_steps=500, seed=7,
+                    finalist_seeds=[0, 1], top_k=2, device_batch_size=8,
+                    val_tokens=1048576, val_loss_every=25, save_every=0,
+                    warmdown_iters=10,
+                )
+                commands = []
+
+                def child(command, **kwargs):
+                    commands.append(command)
+                    alpha = float(command[command.index("--alpha") + 1])
+                    seed = int(command[command.index("--seed") + 1])
+                    steps = int(command[command.index("--num-iterations") + 1])
+                    result_path = Path(command[command.index("--result-file") + 1])
+                    namespace["write_json"](result_path, dict(
+                        status="completed", alpha=alpha, seed=seed, step=steps,
+                        final_val_loss=(alpha - 3.25)**2 + seed,
+                    ))
+                    return SimpleNamespace(returncode=0)
+
+                with mock.patch.object(subprocess, "run", side_effect=child), mock.patch("builtins.print"):
+                    result = namespace["run_alpha_sweep"](options)
+                stages = [f"round_{index}" for index in range(1, rounds + 1)]
+                self.assertEqual(result["config"]["rounds"], rounds)
+                self.assertEqual(set(result["round_grids"]), set(stages))
+                self.assertFalse({"screening", "refinement", "confirmation"} & result.keys())
+                self.assertTrue(all("--no-checkpoints" in command for command in commands))
+                self.assertEqual(result["round_grids"]["round_1"], initial)
+                if rounds == 2:
+                    self.assertTrue(all(row["seed"] == 7 and row["step"] == 100
+                                        for row in result["round_1"]))
+                    self.assertEqual(result["round_grids"]["round_2"],
+                                     [3 + index / 16 for index in range(9)])
+                final = result[stages[-1]]
+                self.assertEqual({row["seed"] for row in final}, {0, 1})
+                self.assertTrue(all(row["step"] == 500 for row in final))
+                self.assertEqual(len(final), 2 * len(result["round_grids"][stages[-1]]))
+                self.assertEqual(result["best_alpha"], 3.0 if rounds == 1 else 3.25)
+                self.assertEqual(json.loads((options.output_dir / "summary.json").read_text()), result)
 
     def test_sweep_aborts_unexpected_child_failure_with_persistent_status(self):
         namespace = sweep_namespace()
@@ -198,6 +345,47 @@ class AlphaSweepTests(unittest.TestCase):
                     )
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("--num-iterations", result.stdout)
+                    if trainer == "train_gpt2_cond_muon.py":
+                        self.assertIn("--rounds", result.stdout)
+                        self.assertIn("--no-checkpoints", result.stdout)
+
+    def test_checkpoint_and_rounds_cli_options(self):
+        trainer = SWEEP / "train_gpt2_cond_muon.py"
+        source = ast.parse(trainer.read_text())
+        definition = next(node for node in source.body if isinstance(node, ast.ClassDef)
+                          and node.name == "Hyperparameters")
+        start = next(index for index, node in enumerate(source.body)
+                     if isinstance(node, ast.Assign) and any(
+                         isinstance(target, ast.Name) and target.id == "defaults"
+                         for target in node.targets))
+        end = next(index for index, node in enumerate(source.body[start:], start)
+                   if isinstance(node, ast.If) and isinstance(node.test, ast.Attribute)
+                   and isinstance(node.test.value, ast.Name) and node.test.value.id == "options"
+                   and node.test.attr == "sweep")
+        code = compile(ast.Module(body=[definition] + source.body[start:end + 1], type_ignores=[]),
+                       str(trainer), "exec")
+        for arguments, disabled in (([], False), (["--no-checkpoints"], True)):
+            env = dict(dataclass=dataclass, os=os, __file__=str(trainer), argparse=argparse,
+                       Path=Path, math=math)
+            with mock.patch.object(sys, "argv", ["trainer"] + arguments):
+                exec(code, env)
+            self.assertEqual(env["options"].rounds, 3)
+            self.assertEqual(env["options"].no_checkpoints, disabled)
+        env = dict(dataclass=dataclass, os=os, __file__=str(trainer), argparse=argparse,
+                   Path=Path, math=math)
+        stderr = io.StringIO()
+        with mock.patch.object(sys, "argv", ["trainer", "--sweep", "--rounds", "0"]), \
+             contextlib.redirect_stderr(stderr), self.assertRaises(SystemExit):
+            exec(code, env)
+        self.assertIn("at least one round", stderr.getvalue())
+        run = mock.Mock()
+        env = dict(dataclass=dataclass, os=os, __file__=str(trainer), argparse=argparse,
+                   Path=Path, math=math, run_alpha_sweep=run,
+                   sys=SimpleNamespace(exit=mock.Mock(side_effect=SystemExit)))
+        with mock.patch.object(sys, "argv", ["trainer", "--sweep", "--rounds", "1",
+                                            "--alpha-grid", "3"]), self.assertRaises(SystemExit):
+            exec(code, env)
+        self.assertEqual(run.call_args.args[0].rounds, 1)
 
 
 if __name__ == "__main__":

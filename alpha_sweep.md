@@ -1,9 +1,9 @@
 ---
 name: alpha-sweep
-description: Run the three-round fixed-Muon-alpha experiment on a Runpod GPU, analyze it, publish checkpoint-free results, and stop compute entirely from tmux.
+description: Run a configurable multi-round fixed-Muon-alpha experiment on a Runpod GPU, analyze it, publish checkpoint-free results, and stop compute entirely from tmux.
 ---
 
-# Three-round Muon alpha sweep
+# Multi-round Muon alpha sweep
 
 Use this repository-specific skill when asked to reproduce or extend the fixed-alpha
 experiment. This is the skill source document; to register it with a client that
@@ -39,11 +39,11 @@ setup workflow; reading the skill alone does not authorize provisioning.
    budget—never create an over-budget pod.
 4. Choose an available data center with network storage and create or reuse an
    appropriately sized **network volume in that same data center**. For the
-   unchanged historical experiment, **30 GB** is a practical starting point:
-   the 33 training shards plus validation shard occupy approximately 6.8 GB,
-   with additional room for the environment, compilation caches, 40 final
-   checkpoints, logs and notebook. Size larger for a larger grid, more seeds,
-   additional datasets, or existing data; do not delete existing volumes to
+   checkpoint-free experiment, **20 GB** is a starting estimate: the 33
+   training shards plus validation shard occupy approximately 6.8 GB, with
+   additional room for the environment, compilation caches, logs and notebook.
+   Check actual free space before launching. Size larger for additional datasets
+   or existing data; do not delete existing volumes to
    make room without authorization. State that volume charges continue until
    deletion. Network volumes require a Secure Cloud pod in the volume's data
    center and an explicit `/workspace` mount.
@@ -60,7 +60,7 @@ setup workflow; reading the skill alone does not authorize provisioning.
    prepare a repository-only deploy key and pod-scoped shutdown access. The
    pod's `RUNPOD_API_KEY` must have permission to read and stop that pod; do
    not assume it exists or copy an account-wide GitHub credential to the pod.
-   Launch the **real** three-round run directly in tmux, as described below.
+   Launch the **real** configured run directly in tmux, as described below.
    Do not add a separate preflight or smoke training run.
 
 If creation fails because stock changed, re-read availability. Keep any volume
@@ -100,17 +100,20 @@ are in `alpha_sweep/models.py`. Use Python to launch its sweep controller, not
 | Global batch | 512 sequences x 1,024 tokens = 524,288 tokens/step |
 | Device batch | 8, with gradient accumulation |
 | Validation | Same first 1,048,576 held-out tokens every 25 steps and at the end |
-| Round 1 | Alphas 0 to 3 inclusive in increments of 0.25; 100 steps; seed 0 |
-| Round 2 | Two best regions, radius 0.25, spacing 0.0625; 100 steps; seed 0 |
-| Round 3 | Two best round-2 regions, radius 0.0625, spacing 0.03125; 500 steps per seed, seeds 0 and 1 |
-| Objective | Lowest mean **final** round-3 validation loss over both seeds |
+| Rounds | Configurable; 100 steps and seed 0 in each non-final round; 500 steps and seeds 0 and 1 in the final round |
+| Search | Round 1 covers the requested initial grid; later rounds refine the two best regions and stay within the original bounds |
+| Objective | Lowest mean **final** validation loss over the final-round seeds |
 | Learning rates | Muon matrices 0.00036; AdamW head 0.0036 |
 
-Merge overlapping candidates; clip to the original 0-3 search bounds. Every
+Merge overlapping candidates; clip to the configured search bounds. Every
 trial starts from scratch. This is a fixed-step experiment, **not one epoch**:
-100 steps consume 52,428,800 tokens and 500 consume 262,144,000. The upper bound
-with two disjoint interior regions is 13,100 optimizer steps; actual counts vary.
-The historical run completed 13 + 13 + 14 = 40 trials (9,600 optimizer steps).
+100 steps consume 52,428,800 tokens and 500 consume 262,144,000. Estimate the
+maximum number of trials and total cost from the configured grid and rounds;
+overlap, boundary clipping and divergence affect actual counts. The historical
+three-round run completed 13 + 13 + 14 = 40 trials (9,600 optimizer steps).
+For the five-round 0-10 grid with spacing 0.25, a disjoint interior upper bound
+is 17,900 steps (41 + 18 + 10 + 10 short trials and 10 final candidates with
+two seeds). Disable all checkpoints for the new sweep.
 
 Fixed alpha uses `(X X.T + 0.01^2 I)^(-alpha/2) X` on Frobenius-normalized
 momentum, transposing tall matrices and preserving output normalization.
@@ -123,8 +126,8 @@ abort the sweep. Seeds do not promise bitwise-deterministic CUDA execution.
 
 Use a running Linux GPU pod with Bash, tmux, Git, OpenSSH, Python with a
 CUDA-enabled PyTorch 2.x, NumPy, and Matplotlib. The historical runtime used
-Python 3.12 and PyTorch 2.8/cu128. Keep the environment, repository, data, logs,
-and checkpoints under the durable mount, e.g. `/workspace`.
+Python 3.12 and PyTorch 2.8/cu128. Keep the environment, repository, data and
+logs under the durable mount, e.g. `/workspace`.
 
 The default interpreter is `/workspace/venv/bin/python`; override with `PYTHON`.
 Install dependencies only if absent. For a fresh dataset, install
@@ -168,8 +171,17 @@ bash alpha_sweep/launch.sh \
   /dev/shm/alpha-publisher/known_hosts \
   DEPLOY_KEY_ID \
   jhshi1879/condition-number-adaptive-muon \
-  alpha_sweep/results/new-run
+  alpha_sweep/results/new-run \
+  --rounds 5 \
+  --alpha-grid 0 0.25 0.5 0.75 1 1.25 1.5 1.75 2 2.25 2.5 2.75 \
+    3 3.25 3.5 3.75 4 4.25 4.5 4.75 5 5.25 5.5 5.75 6 \
+    6.25 6.5 6.75 7 7.25 7.5 7.75 8 8.25 8.5 8.75 9 9.25 9.5 9.75 10
 ```
+
+Choose the positive round count and initial grid for each experiment. The
+launcher uses 100 steps in each non-final round and 500 steps per seed in the
+final round; it disables periodic and final checkpoints. With one round, the
+initial grid is evaluated at the final budget.
 
 `alpha-finalize` starts `alpha-sweep`, waits for the real controller to create
 its summary, freezes an explicit source allowlist without preflight probes, and
@@ -194,7 +206,7 @@ the logged train loss is the final microbatch loss, not a batch mean.
 
 ## Analysis, publication, shutdown
 
-After **all three rounds** complete, `post_analysis.py` produces:
+After **all configured rounds** complete, `post_analysis.py` produces:
 
 - Per-round final validation loss versus alpha.
 - Validation loss versus training step for round winners.
@@ -205,9 +217,8 @@ After **all three rounds** complete, `post_analysis.py` produces:
 
 ### Required notebook writeup
 
-Use **Round 1**, **Round 2**, and **Round 3** in reader-facing prose, figure
-titles, legends, and tables, rather than descriptive stage names. Internal
-result-schema keys remain unchanged for compatibility. Use `$...$` for inline
+Use numbered labels such as **Round 1** and **Round 2** in reader-facing prose,
+figure titles, legends, and tables, rather than descriptive stage names. Use `$...$` for inline
 LaTeX and `$$...$$` for display equations in notebook Markdown.
 
 Include two additional short Markdown paragraphs **in the notebook itself**,

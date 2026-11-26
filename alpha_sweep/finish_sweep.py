@@ -118,12 +118,27 @@ def validate_summary(summary, expected_config):
         raise ValueError("Analysis and publication require a successfully completed sweep")
     if "active_trial" in summary:
         raise ValueError("A completed sweep still has an active trial")
-    for stage in STAGES:
+    rounds = expected_config.get("rounds", 3)
+    if type(rounds) is not int or rounds < 1:
+        raise ValueError("Sweep rounds must be a positive integer")
+    stages = STAGES if rounds == 3 else tuple(f"round_{index}" for index in range(1, rounds + 1))
+    grids = summary.get("round_grids", {})
+    if not isinstance(grids, dict) or set(grids) != set(stages):
+        raise ValueError("Sweep round grids are incomplete or unexpected")
+    stage_keys = {key for key in summary if key in STAGES or re.fullmatch(r"round_[0-9]+", key)}
+    if stage_keys != set(stages):
+        raise ValueError("Sweep stages are incomplete or unexpected")
+    if "alpha_grid" in expected_config and grids[stages[0]] != expected_config["alpha_grid"]:
+        raise ValueError("Initial round grid does not match the sweep configuration")
+    for stage in stages:
         seeds = (
-            expected_config["finalist_seeds"] if stage == "confirmation"
+            expected_config["finalist_seeds"] if stage == stages[-1]
             else [expected_config["screening_seed"]]
         )
-        expected = {(alpha, seed) for alpha in summary["round_grids"][stage] for seed in seeds}
+        grid = grids[stage]
+        if not grid or len(set(grid)) != len(grid) or not seeds or len(set(seeds)) != len(seeds):
+            raise ValueError(f"{stage} has an empty or duplicate grid or seed list")
+        expected = {(alpha, seed) for alpha in grid for seed in seeds}
         actual = [(row["alpha"], row["seed"]) for row in summary[stage]]
         if set(actual) != expected or len(actual) != len(expected):
             raise ValueError(f"{stage} has incomplete or duplicate trials")
@@ -132,7 +147,8 @@ def validate_summary(summary, expected_config):
                 raise ValueError(f"Unexpected trial status in {stage}")
             if row["status"] == "completed" and not math.isfinite(row["final_val_loss"]):
                 raise ValueError(f"Nonfinite completed trial in {stage}")
-    if not summary["ranking"] or summary["best_alpha"] != summary["ranking"][0]["alpha"]:
+    if (not summary["ranking"] or summary["best_alpha"] != summary["ranking"][0]["alpha"]
+            or summary["best_alpha"] not in grids[stages[-1]]):
         raise ValueError("Completed sweep has no consistent final ranking")
 
 
@@ -549,7 +565,7 @@ def pod_watch(sweep_dir, analyzer):
             return
         if summary["status"] != "running":
             raise RuntimeError("Sweep did not finish successfully; post-analysis was not run")
-        print("Waiting on the pod for all three sweep rounds.", flush=True)
+        print("Waiting on the pod for all sweep rounds.", flush=True)
         time.sleep(30)
 
 

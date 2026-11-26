@@ -14,12 +14,7 @@ import uuid
 from pathlib import Path
 
 
-STAGES = ("screening", "refinement", "confirmation")
-LABELS = {
-    "screening": "Round 1",
-    "refinement": "Round 2",
-    "confirmation": "Round 3",
-}
+LEGACY_STAGES = ("screening", "refinement", "confirmation")
 VAL_PATTERN = re.compile(
     r"step:(\d+)/\d+\s+val_loss:([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?)"
 )
@@ -71,6 +66,9 @@ def _validate_config(summary):
     missing = [key for key in required if key not in config]
     if missing:
         raise AnalysisError("Missing config fields: {}".format(", ".join(missing)))
+    rounds = config.get("rounds", 3)
+    if isinstance(rounds, bool) or not isinstance(rounds, int) or rounds < 1:
+        raise AnalysisError("config.rounds must be a positive integer")
     if not isinstance(config["alpha_grid"], list) or not config["alpha_grid"]:
         raise AnalysisError("config.alpha_grid must be a non-empty list")
     config["alpha_grid"] = [_finite_number(value, "config.alpha_grid item")
@@ -92,6 +90,25 @@ def _validate_config(summary):
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise AnalysisError("config.screening_seed must be an integer")
     return config
+
+
+def _stages(summary, config):
+    count = config.get("rounds", 3)
+    stages = (LEGACY_STAGES if count == 3 else
+              tuple("round_{}".format(i) for i in range(1, count + 1)))
+    grids = summary.get("round_grids")
+    if not isinstance(grids, dict):
+        raise AnalysisError("round_grids must be an object")
+    unexpected_grids = set(grids) - set(stages)
+    unexpected_rounds = {
+        key for key in summary
+        if (key in LEGACY_STAGES or re.fullmatch(r"round_\d+", key))
+        and key not in stages
+    }
+    if unexpected_grids or unexpected_rounds:
+        raise AnalysisError("Unexpected round keys: {}".format(
+            ", ".join(sorted(unexpected_grids | unexpected_rounds))))
+    return stages
 
 
 def _stage_grid(summary, stage, config):
@@ -132,27 +149,26 @@ def _read_curve(row, sweep_dir):
 def analyze(summary, sweep_dir):
     """Validate sweep data, aggregate complete alpha trials, and extract curves."""
     config = _validate_config(summary)
+    stages = _stages(summary, config)
     warnings = []
     expected = {}
     row_by_key = {}
 
-    for stage in STAGES:
+    for index, stage in enumerate(stages):
         grid = _stage_grid(summary, stage, config)
-        if stage == "screening" and set(_alpha_key(v) for v in grid) != set(
+        if index == 0 and set(_alpha_key(v) for v in grid) != set(
                 _alpha_key(v) for v in config["alpha_grid"]):
-            raise AnalysisError("round_grids.screening does not match config.alpha_grid")
-        seeds = [config["screening_seed"]] if stage != "confirmation" else config["finalist_seeds"]
+            raise AnalysisError("round_grids.{} does not match config.alpha_grid".format(stage))
+        seeds = config["finalist_seeds"] if index == len(stages) - 1 else [config["screening_seed"]]
         expected[stage] = (grid, seeds)
         rows = summary.get(stage)
         if not isinstance(rows, list):
             raise AnalysisError("summary.{} must be a list".format(stage))
         allowed_alphas = set(_alpha_key(alpha) for alpha in grid)
         allowed_seeds = set(seeds)
-        stage_steps = {
-            "screening": config["screen_steps"],
-            "refinement": config["refine_steps"],
-            "confirmation": config["finalist_steps"],
-        }[stage]
+        stage_steps = (config["finalist_steps"] if index == len(stages) - 1 else
+                       config["screen_steps"] if index == 0 else
+                       config["refine_steps"])
         for row in rows:
             if not isinstance(row, dict):
                 raise AnalysisError("Every {} record must be an object".format(stage))
@@ -193,7 +209,7 @@ def analyze(summary, sweep_dir):
                             stage, alpha, seed, step, stage_steps)
                     )
 
-    for stage in STAGES:
+    for stage in stages:
         grid, seeds = expected[stage]
         for alpha in grid:
             for seed in seeds:
@@ -206,7 +222,7 @@ def analyze(summary, sweep_dir):
     round_data = {}
     winners = {}
     counts = {"diverged_records": 0, "missing_records": 0, "excluded_alpha_rounds": 0}
-    for stage in STAGES:
+    for stage in stages:
         grid, seeds = expected[stage]
         points = []
         coverage = []
@@ -282,18 +298,19 @@ def analyze(summary, sweep_dir):
         else:
             winners[stage] = {"alpha": None, "mean": None, "curves": [], "expected_seeds": seeds}
 
-    final_points = sorted(round_data["confirmation"]["points"],
+    final_stage = stages[-1]
+    final_points = sorted(round_data[final_stage]["points"],
                           key=lambda item: (item["mean"], item["alpha"]))
     if not final_points:
-        raise AnalysisError("No confirmation alpha has all required seeds completed; no best alpha is reportable")
+        raise AnalysisError("No {} alpha has all required seeds completed; no best alpha is reportable".format(final_stage))
     best = final_points[0]
     gap = final_points[1]["mean"] - best["mean"] if len(final_points) > 1 else None
     summary_best = summary.get("best_alpha")
     if summary_best is None or _alpha_key(_finite_number(summary_best, "best_alpha")) != _alpha_key(best["alpha"]):
-        raise AnalysisError("summary.best_alpha disagrees with the best fully observed confirmation mean")
+        raise AnalysisError("summary.best_alpha disagrees with the best fully observed {} mean".format(final_stage))
     ranking = summary.get("ranking")
     if not isinstance(ranking, list) or len(ranking) != len(final_points):
-        raise AnalysisError("summary.ranking disagrees with complete confirmation results")
+        raise AnalysisError("summary.ranking disagrees with complete {} results".format(final_stage))
     for ranked, observed in zip(ranking, final_points):
         if not isinstance(ranked, dict):
             raise AnalysisError("summary.ranking contains a malformed entry")
@@ -316,7 +333,7 @@ def analyze(summary, sweep_dir):
                     for a, b in zip(ranked_losses, observed["losses"]))
         )
         if not same:
-            raise AnalysisError("summary.ranking disagrees with complete confirmation results")
+            raise AnalysisError("summary.ranking disagrees with complete {} results".format(final_stage))
 
     transform = config.get("transform", "")
     floor_match = re.search(r"spectral_floor\s*=\s*([0-9.eE+-]+)", str(transform))
@@ -337,7 +354,9 @@ def analyze(summary, sweep_dir):
             "finalist_steps": config["finalist_steps"],
             "val_tokens": config["val_tokens"],
             "spectral_floor": spectral_floor,
+            "transform": transform,
         },
+        "stage_order": list(stages),
         "rounds": round_data,
         "winners": winners,
         "best": {
@@ -355,12 +374,15 @@ def analyze(summary, sweep_dir):
 PLOT_CODE = r'''import matplotlib.pyplot as plt
 
 # DATA is embedded by post_analysis.py so this notebook can be rerun offline.
-STAGE_ORDER = ("screening", "refinement", "confirmation")
-STAGE_LABELS = {"screening": "Round 1", "refinement": "Round 2",
-                "confirmation": "Round 3"}
+STAGE_ORDER = DATA["stage_order"]
+STAGE_LABELS = {stage: "Round {}".format(i)
+                for i, stage in enumerate(STAGE_ORDER, 1)}
+FINAL_LABEL = STAGE_LABELS[STAGE_ORDER[-1]]
 
 # 1. Final validation loss against alpha, with across-seed standard deviations.
-fig, axes = plt.subplots(1, 3, figsize=(13, 3.8), sharey=True)
+fig, axes = plt.subplots(1, len(STAGE_ORDER), figsize=(4.3 * len(STAGE_ORDER), 3.8),
+                         sharey=True, squeeze=False)
+axes = axes[0]
 for ax, stage in zip(axes, STAGE_ORDER):
     points = DATA["rounds"][stage]["points"]
     if points:
@@ -379,10 +401,13 @@ plt.close(fig)
 
 # 2. Logged validation curves for each round's best complete alpha; absent
 # logs are omitted, never interpolated or synthesized.
-fig, axes = plt.subplots(1, 3, figsize=(13, 3.8), sharey=True)
+fig, axes = plt.subplots(1, len(STAGE_ORDER), figsize=(4.3 * len(STAGE_ORDER), 3.8),
+                         sharey=True, squeeze=False)
+axes = axes[0]
 for ax, stage in zip(axes, STAGE_ORDER):
     winner = DATA["winners"][stage]
     if winner["alpha"] is None:
+        ax.set_title("{} winner".format(STAGE_LABELS[stage]))
         ax.text(0.5, 0.5, "No complete alpha results", ha="center", va="center",
                 transform=ax.transAxes)
     else:
@@ -429,15 +454,15 @@ plt.close(fig)
 
 # 4. Across-seed population standard deviation in the final round.
 fig, ax = plt.subplots(figsize=(7, 4))
-points = DATA["rounds"]["confirmation"]["points"]
+points = DATA["rounds"][STAGE_ORDER[-1]]["points"]
 if points:
     ax.plot([p["alpha"] for p in points], [p["std"] for p in points],
             marker="o")
 else:
-    ax.text(0.5, 0.5, "No complete round 3 results", ha="center", va="center",
+    ax.text(0.5, 0.5, "No complete {} results".format(FINAL_LABEL.lower()), ha="center", va="center",
             transform=ax.transAxes)
 ax.set(xlabel="Alpha", ylabel="Across-seed std. dev. of final validation loss",
-       title="Round 3 seed variability")
+       title="{} seed variability".format(FINAL_LABEL))
 ax.grid(alpha=0.25)
 fig.tight_layout()
 plt.show()
@@ -466,6 +491,57 @@ plt.close(fig)
 
 def _notebook_source(data):
     return "DATA = " + repr(data) + "\n\n" + PLOT_CODE
+
+
+def _notebook_setup(data):
+    config = data["config"]
+    stages = data["stage_order"]
+    lines = [
+        "# Alpha sweep post-analysis\n",
+        "\n",
+        "## Experimental setup\n",
+        "\n",
+        "The summary records {} round(s), with {} validation tokens per run. "
+        "{}The final round uses seeds {}.\n".format(
+            len(stages), config["val_tokens"],
+            "Earlier rounds use seed {}; ".format(config["screening_seed"]) if len(stages) > 1 else "",
+            config["finalist_seeds"]),
+        "\n",
+    ]
+    for i, stage in enumerate(stages):
+        steps = (config["finalist_steps"] if i == len(stages) - 1 else
+                 config["screen_steps"] if i == 0 else
+                 config["refine_steps"])
+        lines.append("- Round {}: {} steps; tested $\\alpha$ grid: {}.\n".format(
+            i + 1, steps, data["rounds"][stage]["grid"]))
+    lines.extend([
+        "\n",
+        "## Alpha and the selection criterion\n",
+        "\n",
+        "The sweep compares $\\alpha$ values by final validation loss. "
+        "For each complete final-round candidate, the reported objective is the "
+        "arithmetic mean $\\bar{L}(\\alpha)=\\frac{1}{n}\\sum_{i=1}^{n}L_i(\\alpha)$ "
+        "across its required seeds; lower is better. Divergent candidates are excluded.\n",
+        "\n",
+    ])
+    if ("exact regularized Gram eigendecomposition" in str(config["transform"]) and
+            config["spectral_floor"] is not None):
+        lines.append(
+            "The recorded transform uses a regularized Gram eigendecomposition: "
+            "for normalized matrix $X$ and $G=XX^\\mathsf{T}$, "
+            "$G=Q\\Lambda Q^\\mathsf{T}$ gives "
+            "$Q(\\max(\\Lambda,0)+\\epsilon^2 I)^{-\\alpha/2}Q^\\mathsf{T}X$, "
+            + "with spectral floor $\\epsilon={:g}$. ".format(config["spectral_floor"]) +
+            "At $\\alpha=0$ the normalized matrix is unchanged; larger $\\alpha$ "
+            "increases the relative weighting of smaller eigenvalues.\n")
+    else:
+        lines.append("The summary does not establish a specific alpha transform and spectral floor.\n")
+    lines.extend([
+        "\n",
+        "The notebook embeds the observed data and standalone plotting code; "
+        "rerun the code cell to reproduce the figures.\n",
+    ])
+    return lines
 
 
 def _render_notebook(data, report_text):
@@ -504,12 +580,7 @@ def _render_notebook(data, report_text):
             {
                 "cell_type": "markdown",
                 "metadata": {},
-                "source": [
-                    "# Alpha sweep post-analysis\n",
-                    "\n",
-                    "This notebook embeds the observed data and standalone plotting code. "
-                    "Rerun the code cell to reproduce the figures."
-                ],
+                "source": _notebook_setup(data),
             },
             {
                 "cell_type": "markdown",
@@ -538,20 +609,29 @@ def _render_notebook(data, report_text):
 
 def _report(data):
     config, best, counts = data["config"], data["best"], data["counts"]
+    n = len(data["stage_order"])
     gap_text = ("the next-best complete tested alpha was {:.6g} higher".format(best["gap"])
                 if best["gap"] is not None else "no second complete alpha was available for a gap")
     floor_text = (" The configured spectral floor was {}.".format(config["spectral_floor"])
                   if config["spectral_floor"] is not None else "")
+    objective = str(config["objective"])
+    for name, label in (("screening", "round 1"), ("refinement", "round 2"),
+                        ("confirmation", "round {}".format(n))):
+        objective = re.sub(name, label, objective, flags=re.IGNORECASE)
+    budgets = ", ".join(
+        "round {}: {} steps".format(i + 1,
+            config["finalist_steps"] if i == n - 1 else
+            config["screen_steps"] if i == 0 else config["refine_steps"])
+        for i in range(n))
+    earlier_seeds = (" Earlier rounds used seed {}.".format(config["screening_seed"])
+                     if n > 1 else "")
     paragraph_one = (
         "The sweep selected $\\alpha={:.12g}$ by minimizing the mean final validation loss, using "
-        "objective '{}' and round 3 seeds {}; its observed mean was {:.6g} with "
-        "population standard deviation {:.6g}, and {}. Budgets were {} round 1 steps and "
-        "{} round 2 steps for seed {}, then {} round 3 steps; each run "
-        "used {} validation tokens.{}".format(
-            best["alpha"], config["objective"].replace("confirmation", "round 3"),
-            config["finalist_seeds"], best["mean"],
-            best["std"], gap_text, config["screen_steps"], config["refine_steps"],
-            config["screening_seed"], config["finalist_steps"], config["val_tokens"], floor_text,
+        "objective '{}' and round {} seeds {}; its observed mean was {:.6g} with "
+        "population standard deviation {:.6g}, and {}. Budgets were {}; each run "
+        "used {} validation tokens.{}{}".format(
+            best["alpha"], objective, n, config["finalist_seeds"], best["mean"],
+            best["std"], gap_text, budgets, config["val_tokens"], earlier_seeds, floor_text,
         )
     )
     warning_text = (" Logged validation curves missing: {}.".format(

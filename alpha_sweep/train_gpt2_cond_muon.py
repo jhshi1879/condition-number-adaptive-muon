@@ -340,6 +340,13 @@ def refine_alpha_grid(centers, radius, subdivisions, lower, upper):
 
 
 def run_alpha_sweep(options):
+    rounds = getattr(options, "rounds", 3)
+    if rounds < 1:
+        raise ValueError("sweeps need at least one round")
+    stages = (
+        ["screening", "refinement", "confirmation"]
+        if rounds == 3 else [f"round_{index}" for index in range(1, rounds + 1)]
+    )
     root = options.output_dir or Path("logs") / ("alpha-sweep-" + str(uuid.uuid4()))
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=False)
@@ -361,13 +368,13 @@ def run_alpha_sweep(options):
             transform="exact regularized Gram eigendecomposition; spectral_floor=0.01",
             objective="mean final validation loss across confirmation seeds",
         ),
-        screening=[],
-        refinement=[],
-        confirmation=[],
-        round_grids=dict(screening=options.alpha_grid),
-        ranking=[],
-        best_alpha=None,
     )
+    for stage in stages:
+        summary[stage] = []
+    summary.update(round_grids={stages[0]: options.alpha_grid}, ranking=[], best_alpha=None)
+    if rounds != 3:
+        summary["config"]["rounds"] = rounds
+        summary["config"]["objective"] = "mean final validation loss across final-round seeds"
     summary_path = root / "summary.json"
     write_json(summary_path, summary)
 
@@ -385,7 +392,7 @@ def run_alpha_sweep(options):
             "--val-tokens", str(options.val_tokens),
             "--val-loss-every", str(options.val_loss_every),
             "--save-every", str(options.save_every), "--output-dir", str(directory),
-            "--result-file", str(result_path),
+            "--result-file", str(result_path), "--no-checkpoints",
         ]
         summary["active_trial"] = dict(
             stage=stage, alpha=alpha, seed=seed, steps=steps,
@@ -423,29 +430,32 @@ def run_alpha_sweep(options):
         return [row["alpha"] for row in candidates[:options.top_k]]
 
     try:
+        first_seeds = options.finalist_seeds if rounds == 1 else [options.seed]
+        first_steps = options.finalist_steps if rounds == 1 else options.screen_steps
         for index, alpha in enumerate(options.alpha_grid):
-            trial("screening", alpha, options.seed, options.screen_steps, index)
+            for seed_index, seed in enumerate(first_seeds):
+                trial(stages[0], alpha, seed, first_steps, index * len(first_seeds) + seed_index)
         initial = sorted(options.alpha_grid)
-        radius = min(right - left for left, right in zip(initial, initial[1:]))
+        radius = min(right - left for left, right in zip(initial, initial[1:])) if rounds > 1 else None
         lower, upper = initial[0], initial[-1]
-        refined = refine_alpha_grid(
-            select_regions("screening"), radius, 4, lower, upper,
-        )
-        summary["round_grids"]["refinement"] = refined
-        for index, alpha in enumerate(refined):
-            trial("refinement", alpha, options.seed, options.refine_steps, index)
-        finalists = refine_alpha_grid(
-            select_regions("refinement"), radius / 4, 2, lower, upper,
-        )
-        summary["round_grids"]["confirmation"] = finalists
-        for index, alpha in enumerate(finalists):
-            for seed_index, seed in enumerate(options.finalist_seeds):
-                trial(
-                    "confirmation", alpha, seed, options.finalist_steps,
-                    index * len(options.finalist_seeds) + seed_index,
-                )
+        grid = options.alpha_grid
+        for round_index in range(1, rounds):
+            subdivisions = 4 if round_index == 1 else 2
+            grid = refine_alpha_grid(
+                select_regions(stages[round_index - 1]), radius, subdivisions, lower, upper,
+            )
+            radius /= subdivisions
+            stage = stages[round_index]
+            summary["round_grids"][stage] = grid
+            final = round_index == rounds - 1
+            seeds = options.finalist_seeds if final else [options.seed]
+            steps = options.finalist_steps if final else options.refine_steps
+            for index, alpha in enumerate(grid):
+                for seed_index, seed in enumerate(seeds):
+                    trial(stage, alpha, seed, steps, index * len(seeds) + seed_index)
+        finalists = grid
         for alpha in finalists:
-            rows = [row for row in summary["confirmation"] if row["alpha"] == alpha]
+            rows = [row for row in summary[stages[-1]] if row["alpha"] == alpha]
             if any(row["status"] != "completed" for row in rows):
                 continue
             losses = [row["final_val_loss"] for row in rows]
@@ -462,7 +472,7 @@ def run_alpha_sweep(options):
         )
         diverged = any(
             row["status"] == "diverged"
-            for stage in ("screening", "refinement", "confirmation") for row in summary[stage]
+            for stage in stages for row in summary[stage]
         )
         summary["status"] = "completed_with_divergences" if diverged else "completed"
         print(f"Best tested alpha: {summary['best_alpha']:g}; results: {summary_path}", flush=True)
@@ -499,17 +509,19 @@ parser.add_argument("--warmdown-iters", type=int, default=defaults.warmdown_iter
 parser.add_argument("--val-loss-every", type=int, default=None)
 parser.add_argument("--val-tokens", type=int, default=None)
 parser.add_argument("--save-every", type=int, default=None, help="0 saves only the final checkpoint")
+parser.add_argument("--no-checkpoints", action="store_true", help="disable all checkpoint writes")
 parser.add_argument("--alpha", type=float, help="fixed spectral alpha >= 0, including values above 1; omit for adaptive Muon")
 parser.add_argument("--seed", type=int, help="initialization seed; sweep defaults to 0")
 parser.add_argument("--output-dir", type=Path)
 parser.add_argument("--result-file", type=Path)
-parser.add_argument("--sweep", action="store_true", help="run three progressively narrower single-GPU search rounds")
+parser.add_argument("--sweep", action="store_true", help="run progressively narrower single-GPU search rounds")
+parser.add_argument("--rounds", type=int, default=3, help="number of sweep rounds (at least 1)")
 parser.add_argument("--alpha-grid", type=float, nargs="+", default=[i / 4 for i in range(13)])
 parser.add_argument("--screen-steps", type=int, default=100)
 parser.add_argument("--refine-steps", type=int, default=100)
 parser.add_argument("--finalist-steps", type=int, default=500)
 parser.add_argument("--finalist-seeds", type=int, nargs="+", default=[0, 1])
-parser.add_argument("--top-k", type=int, default=2, help="number of promising alpha neighborhoods to refine after rounds 1 and 2")
+parser.add_argument("--top-k", type=int, default=2, help="number of promising alpha neighborhoods to refine each round")
 options = parser.parse_args()
 if options.device_batch_size is None:
     options.device_batch_size = 8 if options.sweep else defaults.device_batch_size
@@ -543,11 +555,13 @@ if len(set(options.finalist_seeds)) != len(options.finalist_seeds):
     parser.error("finalist seeds must be unique")
 if min(options.screen_steps, options.refine_steps, options.finalist_steps, options.top_k) <= 0:
     parser.error("sweep step counts and top-k must be positive")
-if options.top_k > len(options.alpha_grid):
+if options.top_k > len(options.alpha_grid) and not (options.sweep and options.rounds == 1):
     parser.error("top-k cannot exceed the number of grid values")
 if options.sweep:
-    if len(options.alpha_grid) < 2:
-        parser.error("three-round sweeps need at least two initial alpha values")
+    if options.rounds < 1:
+        parser.error("sweeps need at least one round")
+    if options.rounds > 1 and len(options.alpha_grid) < 2:
+        parser.error("sweeps need at least two initial alpha values")
     if "RANK" in os.environ or options.alpha is not None or options.result_file is not None:
         parser.error("run --sweep with python (not torchrun), without --alpha or --result-file")
     if defaults.batch_size % options.device_batch_size or options.val_tokens % (options.device_batch_size * defaults.sequence_length):
@@ -711,7 +725,7 @@ for step in range(args.num_iterations + 1):
         torch.cuda.synchronize()
         t0 = time.time()
 
-    if master_process and (last_step or (args.save_every > 0 and step % args.save_every == 0)):
+    if master_process and not options.no_checkpoints and (last_step or (args.save_every > 0 and step % args.save_every == 0)):
         # stop the clock
         torch.cuda.synchronize()
         training_time_ms += 1000 * (time.time() - t0)

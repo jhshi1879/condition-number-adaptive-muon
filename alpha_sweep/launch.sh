@@ -9,17 +9,57 @@ if [[ ${1:-} == --run ]]; then
     mode=run
     shift
 fi
-if (( $# < 5 || $# > 7 )); then
-    echo "Usage (on pod): bash alpha_sweep/launch.sh SWEEP_DIR POD_ID DEPLOY_KEY KNOWN_HOSTS DEPLOY_KEY_ID [OWNER/REPO] [RESULTS_PATH]" >&2
+launch_args=("$@")
+positional=()
+while (( $# )) && [[ $1 != --* ]]; do
+    positional+=("$1")
+    shift
+done
+if (( ${#positional[@]} < 5 || ${#positional[@]} > 7 )); then
+    echo "Usage (on pod): bash alpha_sweep/launch.sh SWEEP_DIR POD_ID DEPLOY_KEY KNOWN_HOSTS DEPLOY_KEY_ID [OWNER/REPO] [RESULTS_PATH] [--rounds N] [--alpha-grid ALPHA ...]" >&2
     exit 2
 fi
-sweep_dir=$1
-pod_id=$2
-key=$3
-known_hosts=$4
-key_id=$5
-repo=${6:-jhshi1879/condition-number-adaptive-muon}
-results=${7:-alpha_sweep/results/three-rounds}
+sweep_dir=${positional[0]}
+pod_id=${positional[1]}
+key=${positional[2]}
+known_hosts=${positional[3]}
+key_id=${positional[4]}
+repo=${positional[5]:-jhshi1879/condition-number-adaptive-muon}
+results=${positional[6]:-alpha_sweep/results/three-rounds}
+rounds=3
+alpha_grid=(0 0.25 0.5 0.75 1 1.25 1.5 1.75 2 2.25 2.5 2.75 3)
+while (( $# )); do
+    case $1 in
+        --rounds)
+            if (( $# < 2 )) || [[ ! $2 =~ ^0*[1-9][0-9]*$ ]]; then
+                echo "--rounds requires a positive integer" >&2
+                exit 2
+            fi
+            rounds=$2
+            shift 2
+            ;;
+        --alpha-grid)
+            shift
+            alpha_grid=()
+            while (( $# )) && [[ $1 != --* ]]; do
+                alpha_grid+=("$1")
+                shift
+            done
+            ;;
+        *)
+            echo "Unknown option: $1" >&2
+            exit 2
+            ;;
+    esac
+done
+if (( ${#alpha_grid[@]} < 1 )); then
+    echo "--alpha-grid requires at least one alpha value" >&2
+    exit 2
+fi
+if [[ ! $rounds =~ ^0*1$ ]] && (( ${#alpha_grid[@]} < 2 )); then
+    echo "Multiple rounds require at least two alpha values" >&2
+    exit 2
+fi
 if [[ $sweep_dir != /* || -e $sweep_dir || -e "$sweep_dir.console.log" ]]; then
     echo "Use a new absolute sweep directory; existing results/logs are never overwritten." >&2
     exit 1
@@ -37,7 +77,7 @@ if [[ $mode == launch ]]; then
             exit 1
         fi
     done
-    printf -v command '%q ' bash "$script" --run "$sweep_dir" "$pod_id" "$key" "$known_hosts" "$key_id" "$repo" "$results"
+    printf -v command '%q ' bash "$script" --run "${launch_args[@]}"
     printf -v log '%q' "$sweep_dir.finalization.log"
     mkdir -p -- "$(dirname -- "$sweep_dir")"
     tmux new-session -d -s alpha-finalize -c "$root" \
@@ -53,10 +93,10 @@ if [[ -z ${TMUX:-} ]]; then
     exit 1
 fi
 printf -v training '%q ' "$python" -u "$root/alpha_sweep/train_gpt2_cond_muon.py" \
-    --sweep --alpha-grid 0 0.25 0.5 0.75 1 1.25 1.5 1.75 2 2.25 2.5 2.75 3 \
+    --sweep --rounds "$rounds" --alpha-grid "${alpha_grid[@]}" \
     --screen-steps 100 --refine-steps 100 --finalist-steps 500 \
     --finalist-seeds 0 1 --top-k 2 --seed 0 --val-tokens 1048576 \
-    --val-loss-every 25 --device-batch-size 8 --save-every 0 \
+    --val-loss-every 25 --device-batch-size 8 --save-every 0 --no-checkpoints \
     --warmdown-iters 10 --output-dir "$sweep_dir"
 printf -v log '%q' "$sweep_dir.console.log"
 tmux new-session -d -s alpha-sweep -c "$root" \

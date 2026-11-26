@@ -88,6 +88,51 @@ class PostAnalysisTests(unittest.TestCase):
     def _write_summary(self):
         (self.sweep_dir / "summary.json").write_text(json.dumps(self.summary))
 
+    def _five_rounds(self):
+        self.summary["config"]["rounds"] = 5
+        self.summary["config"]["objective"] = "mean final validation loss across final-round seeds"
+        self.stage_steps["round_5"] = 50
+        grids = self.summary["round_grids"]
+        self.summary["round_1"] = self.summary.pop("screening")
+        self.summary["round_2"] = self.summary.pop("refinement")
+        self.summary["round_5"] = self.summary.pop("confirmation")
+        self.summary["round_grids"] = {
+            "round_1": grids["screening"], "round_2": grids["refinement"],
+            "round_3": [0.5], "round_4": [0.5],
+            "round_5": grids["confirmation"],
+        }
+        for stage in ("round_3", "round_4"):
+            self.stage_steps[stage] = 20
+            self.summary[stage] = [self._row(stage, 0.5, 0, "completed", 3.8, 1, log=True)]
+        self._write_summary()
+
+    def _short_sweep(self, count):
+        grids = self.summary["round_grids"]
+        screening = self.summary.pop("screening")
+        self.summary.pop("refinement")
+        self.summary.pop("confirmation")
+        self.summary["config"]["rounds"] = count
+        self.summary["config"]["finalist_steps"] = 500
+        self.summary["config"]["objective"] = "mean final validation loss across final-round seeds"
+        final_stage = "round_{}".format(count)
+        self.stage_steps[final_stage] = 500
+        if count == 1:
+            self.summary["config"]["alpha_grid"] = grids["confirmation"]
+            self.summary["round_grids"] = {final_stage: grids["confirmation"]}
+        else:
+            self.summary["round_grids"] = {
+                "round_1": grids["screening"], final_stage: grids["confirmation"],
+            }
+            self.summary["round_1"] = screening
+        self.summary[final_stage] = [
+            self._row(final_stage, 0.5, 0, "completed", 3.0, 2, log=True),
+            self._row(final_stage, 0.5, 1, "completed", 3.2, 2, log=True),
+            self._row(final_stage, 1.0, 0, "completed", 2.8, 2, log=True),
+            self._row(final_stage, 1.0, 1, "diverged", None, 0.5),
+        ]
+        self._write_summary()
+        return final_stage
+
     def test_analysis_excludes_bad_alpha_and_renders_reproducible_notebook(self):
         data, destination = post_analysis.create_analysis(self.sweep_dir)
         self.assertEqual(data["best"]["alpha"], 0.5)
@@ -114,6 +159,12 @@ class PostAnalysisTests(unittest.TestCase):
 
         notebook = json.loads((destination / "analysis.ipynb").read_text())
         self.assertEqual(notebook["nbformat_minor"], 4)
+        setup = "".join(notebook["cells"][0]["source"])
+        self.assertIn("## Experimental setup", setup)
+        self.assertIn("## Alpha and the selection criterion", setup)
+        self.assertIn("$\\alpha$", setup)
+        self.assertIn("$\\epsilon=0.01$", setup)
+        self.assertIn("Round 3: 50 steps", setup)
         self.assertEqual("".join(notebook["cells"][1]["source"]), report + "\n")
         cell = notebook["cells"][2]
         self.assertEqual(notebook["nbformat"], 4)
@@ -161,6 +212,141 @@ class PostAnalysisTests(unittest.TestCase):
                 if legend is not None:
                     for label in legend.get_texts():
                         self.assertNotRegex(label.get_text(), r"(?i)screening|refinement|confirmation")
+
+    def test_five_rounds_are_validated_and_rendered(self):
+        self._five_rounds()
+        self.summary["round_3"][0]["status"] = "diverged"
+        self.summary["round_3"][0]["final_val_loss"] = None
+        self._write_summary()
+        data, destination = post_analysis.create_analysis(self.sweep_dir)
+        self.assertEqual(data["stage_order"], ["round_{}".format(i) for i in range(1, 6)])
+        self.assertEqual(data["best"]["alpha"], 0.5)
+        self.assertEqual(len(data["winners"]["round_5"]["curves"]), 2)
+        report = (destination / "experiment_report.md").read_text().strip()
+        self.assertEqual(len(report.split("\n\n")), 2)
+        self.assertIn("round 5 seeds [0, 1]", report)
+        self.assertIn("round 4: 20 steps", report)
+        notebook = json.loads((destination / "analysis.ipynb").read_text())
+        setup = "".join(notebook["cells"][0]["source"])
+        self.assertIn("Round 5: 50 steps", setup)
+        self.assertIn("$\\bar{L}", setup)
+        cell = notebook["cells"][2]
+        self.assertEqual(len(cell["outputs"]), 5)
+        for output in cell["outputs"]:
+            self.assertTrue(base64.b64decode(output["data"]["image/png"]).startswith(b"\x89PNG\r\n\x1a\n"))
+        import matplotlib.pyplot as plt
+        shown = []
+        original_show = plt.show
+        try:
+            plt.show = lambda *args, **kwargs: shown.append(plt.gcf())
+            exec("".join(cell["source"]), {})
+        finally:
+            plt.show = original_show
+            plt.close("all")
+        self.assertEqual(len(shown), 5)
+        self.assertEqual([ax.get_title() for ax in shown[0].axes],
+                         ["Round {}".format(i) for i in range(1, 6)])
+        self.assertTrue(all(ax.get_title().startswith("Round {} winner".format(i))
+                            for i, ax in enumerate(shown[1].axes, 1)))
+        self.assertEqual(shown[3].axes[0].get_title(), "Round 5 seed variability")
+        self.assertEqual([label.get_text() for label in shown[4].axes[0].get_xticklabels()],
+                         ["Round {}".format(i) for i in range(1, 6)])
+
+    def test_five_rounds_reject_missing_rounds_results_wrong_budgets_and_ranking(self):
+        self._five_rounds()
+        del self.summary["round_grids"]["round_3"]
+        with self.assertRaisesRegex(post_analysis.AnalysisError, "round_grids.round_3"):
+            post_analysis.analyze(self.summary, self.sweep_dir)
+        self.summary["round_grids"]["round_3"] = [0.5]
+        self.summary["round_4"] = []
+        with self.assertRaisesRegex(post_analysis.AnalysisError, "missing required round_4 result"):
+            post_analysis.analyze(self.summary, self.sweep_dir)
+        self.summary["round_4"] = [self._row("round_4", 0.5, 0, "completed", 3.8, 1, log=True)]
+        self.summary["round_4"][0]["step"] = 10
+        with self.assertRaisesRegex(post_analysis.AnalysisError, "expected 20"):
+            post_analysis.analyze(self.summary, self.sweep_dir)
+        self.summary["round_4"][0]["step"] = 20
+        self.summary["round_5"].pop(0)
+        with self.assertRaisesRegex(post_analysis.AnalysisError, "missing required round_5 result"):
+            post_analysis.analyze(self.summary, self.sweep_dir)
+        self.summary["round_5"].insert(0, self._row("round_5", 0.5, 0, "completed", 3.0, 2, log=True))
+        self.summary["round_5"][0]["step"] = 20
+        with self.assertRaisesRegex(post_analysis.AnalysisError, "expected 50"):
+            post_analysis.analyze(self.summary, self.sweep_dir)
+        self.summary["round_5"][0]["step"] = 50
+        self.summary["ranking"][0]["mean_val_loss"] = 9
+        with self.assertRaisesRegex(post_analysis.AnalysisError, "summary.ranking disagrees"):
+            post_analysis.analyze(self.summary, self.sweep_dir)
+
+    def test_unknown_transform_is_not_invented_and_extra_rounds_are_rejected(self):
+        self.summary["config"].pop("transform")
+        data = post_analysis.analyze(self.summary, self.sweep_dir)
+        setup = "".join(post_analysis._notebook_setup(data))
+        self.assertIn("does not establish a specific alpha transform", setup)
+        self.assertNotIn("$\\epsilon=", setup)
+        self.summary["round_grids"]["round_4"] = [0.5]
+        with self.assertRaisesRegex(post_analysis.AnalysisError, "Unexpected round keys"):
+            post_analysis.analyze(self.summary, self.sweep_dir)
+        del self.summary["round_grids"]["round_4"]
+        for rounds in (0, -1, True, 3.5):
+            self.summary["config"]["rounds"] = rounds
+            with self.assertRaisesRegex(post_analysis.AnalysisError, "config.rounds"):
+                post_analysis.analyze(self.summary, self.sweep_dir)
+
+    def _check_short_sweep(self, count):
+        final_stage = self._short_sweep(count)
+        row = self.summary[final_stage].pop(1)
+        with self.assertRaisesRegex(post_analysis.AnalysisError, "missing required {} result".format(final_stage)):
+            post_analysis.analyze(self.summary, self.sweep_dir)
+        self.summary[final_stage].insert(1, row)
+        row["step"] = 10
+        with self.assertRaisesRegex(post_analysis.AnalysisError, "expected 500"):
+            post_analysis.analyze(self.summary, self.sweep_dir)
+        row["step"] = 500
+        self.summary["ranking"][0]["mean_val_loss"] = 9
+        with self.assertRaisesRegex(post_analysis.AnalysisError, "summary.ranking disagrees"):
+            post_analysis.analyze(self.summary, self.sweep_dir)
+        self.summary["ranking"][0]["mean_val_loss"] = 3.1
+        self._write_summary()
+        data, destination = post_analysis.create_analysis(self.sweep_dir)
+        self.assertEqual(len(data["stage_order"]), count)
+        self.assertEqual(data["winners"][final_stage]["expected_seeds"], [0, 1])
+        self.assertEqual(len(data["winners"][final_stage]["curves"]), 2)
+        self.assertEqual(data["best"]["alpha"], 0.5)
+        report = (destination / "experiment_report.md").read_text().strip()
+        self.assertEqual(len(report.split("\n\n")), 2)
+        self.assertIn("round {}: 500 steps".format(count), report)
+        if count == 1:
+            self.assertNotIn("Earlier rounds", report)
+        else:
+            self.assertIn("round 1: 10 steps", report)
+        notebook = json.loads((destination / "analysis.ipynb").read_text())
+        setup = "".join(notebook["cells"][0]["source"])
+        self.assertIn("Round {}: 500 steps".format(count), setup)
+        if count == 1:
+            self.assertNotIn("Earlier rounds", setup)
+        cell = notebook["cells"][2]
+        self.assertEqual(len(cell["outputs"]), 5)
+        import matplotlib.pyplot as plt
+        shown = []
+        original_show = plt.show
+        try:
+            plt.show = lambda *args, **kwargs: shown.append(plt.gcf())
+            exec("".join(cell["source"]), {})
+        finally:
+            plt.show = original_show
+            plt.close("all")
+        self.assertEqual(len(shown), 5)
+        self.assertEqual([ax.get_title() for ax in shown[0].axes],
+                         ["Round {}".format(i) for i in range(1, count + 1)])
+        self.assertEqual(len(shown[1].axes), count)
+        self.assertEqual(shown[3].axes[0].get_title(), "Round {} seed variability".format(count))
+
+    def test_one_round_uses_finalist_budget_and_seeds(self):
+        self._check_short_sweep(1)
+
+    def test_two_rounds_use_screen_then_finalist(self):
+        self._check_short_sweep(2)
 
     def test_manifest_rerun_is_idempotent_and_different_summary_is_refused(self):
         _, destination = post_analysis.create_analysis(self.sweep_dir)
