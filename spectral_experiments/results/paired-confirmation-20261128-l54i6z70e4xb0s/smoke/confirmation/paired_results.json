@@ -1,0 +1,62 @@
+[
+  {
+    "experiment": "linear_interpolation",
+    "steps": 1,
+    "baseline": "alpha=1",
+    "candidate": "alpha=0.25",
+    "n": 2,
+    "mean_difference": -0.0077362060546875,
+    "lower": -0.05028130096216546,
+    "upper": 0.03480888885279046
+  },
+  {
+    "experiment": "singular_value_clipping",
+    "steps": 1,
+    "baseline": "exact Muon",
+    "candidate": "upper=2\u00d7median",
+    "n": 2,
+    "mean_difference": -0.002800464630126953,
+    "lower": -0.020029771043857326,
+    "upper": 0.01442884178360342
+  },
+  {
+    "experiment": "selective_transformation",
+    "steps": 1,
+    "baseline": "all 100%",
+    "candidate": "top 25%",
+    "n": 2,
+    "mean_difference": -0.0051822662353515625,
+    "lower": -0.045323271875797384,
+    "upper": 0.03495873940509426
+  },
+  {
+    "experiment": "low_rank_orthogonalization",
+    "steps": 1,
+    "baseline": "top 100%",
+    "candidate": "top 25%",
+    "n": 2,
+    "mean_difference": -0.005191802978515625,
+    "lower": -0.047008385986892935,
+    "upper": 0.036624780029861685
+  },
+  {
+    "experiment": "alpha_power",
+    "steps": 1,
+    "baseline": "alpha=1",
+    "candidate": "alpha=0.9375",
+    "n": 2,
+    "mean_difference": -0.0028963088989257812,
+    "lower": -0.017393695691028714,
+    "upper": 0.011601077893177153
+  },
+  {
+    "experiment": "alpha_power",
+    "steps": 1,
+    "baseline": "alpha=1",
+    "candidate": "alpha=1.0625",
+    "n": 2,
+    "mean_difference": 0.0025000572204589844,
+    "lower": -0.011013838507858073,
+    "upper": 0.016013952948776042
+  }
+]
