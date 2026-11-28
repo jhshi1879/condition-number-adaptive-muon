@@ -1,0 +1,3 @@
+The linear interpolation experiment completed 10 of 10 trials; 0 diverged. Among configurations completed for every seed, alpha=0.25 had the lowest mean final validation loss (5.250553) over 5 seed(s). This is the best tested configuration, not evidence of a global optimum.
+
+Every trial used 500 steps and the same GPT architecture and data loader as the alpha sweep. Update norms were matched per matrix block; validation curves in the notebook are rounded console values, while final rankings use full-precision results. Elapsed time includes setup and validation; optimizer-only overhead was not measured.
