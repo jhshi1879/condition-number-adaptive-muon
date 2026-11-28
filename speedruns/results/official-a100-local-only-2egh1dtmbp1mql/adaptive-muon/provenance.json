@@ -1,0 +1,171 @@
+{
+  "experiment": "Condition-number-adaptive Muon",
+  "description": "optimizer defaults from the recorded trainer",
+  "source_hashes": {
+    "speedruns/baseline_pair_run.py": "32882603d2c639deae336d5a2e5b16fad6756fd0b3ab2de31b6bf1e1c9f2a865",
+    "speedruns/run_speedruns.py": "677b244ef8cc31aeec9481a52bb4c30a0000495d6ef0c95b6ec8d9a706040c6d",
+    "speedruns/fixed_alpha_run.py": "106a80840854be3661857f4154eee00cd4c752dc6099788c91e64f16511a86c2",
+    "speedruns/fixed_alpha_analysis.py": "b3f57f3c447d942ec53004b08787266f34b485230d92178410ed73219ef0c836",
+    "speedruns/checkpoint_publication.py": "3ad9dd1f3f23503d689ebb11dc571e6de5c5e5c1e7666a1c3b6168e0507b62f0",
+    "speedruns/train_gpt2.py": "86983e041dac1e4e9c58eece196b7712f790cd1b4df1543a202179ad3d2357ee",
+    "speedruns/train_gpt2_adamw.py": "8fff2a6bf98668b4e1ba3cfa396d2833bccb847eeed9fc56fd08e98835f0c3cc",
+    "speedruns/train_gpt2_cond_muon.py": "4b9751ff7c776e560734834da46bd5b6c801bb5e0dc9fea0d8cc40d1514efed5",
+    "speedruns/train_gpt2_fixed_alpha.py": "96875f847ab8f67386481d0ef3a022534f64605a67cf49bcc86c2bbf8cc562f1",
+    "metrics.py": "4316184dc68eaba40c2ce6055ad8d965b8753be47f9b3a3c5c4acb7672ea1846",
+    "data/cached_fineweb10B.py": "adcc9f7d81ed1ac115a66d08d94d8d3e5c7425cabaf856da1f1fb106af87d09b",
+    "alpha_sweep/finish_sweep.py": "6ea2553aab3b68d2fe03199ad0e29b11d904ab75584930f335d3b2982ffdec6e"
+  },
+  "dataset": "kjj0/fineweb10B-gpt2",
+  "dataset_files": [
+    {
+      "name": "fineweb_val_000000.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000001.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000002.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000003.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000004.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000005.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000006.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000007.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000008.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000009.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000010.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000011.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000012.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000013.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000014.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000015.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000016.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000017.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000018.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000019.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000020.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000021.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000022.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000023.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000024.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000025.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000026.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000027.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000028.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000029.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000030.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000031.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000032.bin",
+      "bytes": 200001024
+    },
+    {
+      "name": "fineweb_train_000033.bin",
+      "bytes": 200001024
+    }
+  ],
+  "dataset_revision": "not recorded",
+  "python": "3.12.3",
+  "pytorch": "2.8.0+cu128",
+  "cuda": "12.8",
+  "gpu": "NVIDIA A100-SXM4-80GB",
+  "non_h100_explicitly_authorized": true,
+  "checkpoint_publication": "local_only",
+  "command": "/usr/bin/python3 -u -m torch.distributed.run --standalone --nproc_per_node=1 /workspace/speedruns-official-a100-local-only-20261128/source/speedruns/train_gpt2_cond_muon.py --save-every 0",
+  "seed": "not explicitly set",
+  "smoke": false,
+  "steps": 6200,
+  "val_loss_every": 125,
+  "val_tokens": 10485760,
+  "training_log_published": true
+}
